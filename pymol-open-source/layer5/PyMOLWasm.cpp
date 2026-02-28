@@ -76,6 +76,14 @@ int PyMOLWasm_Hide(CPyMOL* pymolPtr, const char* rep_name, const char* selection
     PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
     if (!G) return 0;
     
+    // Special case: hide all representations
+    if (strcmp(rep_name, "everything") == 0) {
+        for (int i = 0; i < cRepCnt; i++) {
+            ExecutiveSetRepVisib(G, selection, i, 0);
+        }
+        return 1;
+    }
+
     int rep_id = -1;
     if (strcmp(rep_name, "lines") == 0) rep_id = cRepLine;
     else if (strcmp(rep_name, "spheres") == 0) rep_id = cRepSphere;
@@ -85,20 +93,10 @@ int PyMOLWasm_Hide(CPyMOL* pymolPtr, const char* rep_name, const char* selection
     else if (strcmp(rep_name, "sticks") == 0) rep_id = cRepCyl;
     else if (strcmp(rep_name, "mesh") == 0) rep_id = cRepMesh;
     else if (strcmp(rep_name, "dots") == 0) rep_id = cRepDot;
-    else if (strcmp(rep_name, "everything") == 0) rep_id = -1; // hide everything uses a special code or loops
-    
-    // For 'everything', PyMOL usually loops over all reps or passes a specific flag
-    if (strcmp(rep_name, "everything") == 0) {
-        // Special case: hide all representations
-        for (int i = 0; i < cRepCnt; i++) {
-            ExecutiveSetRepVisib(G, selection, i, 0);
-        }
-        return 1;
-    }
-    
+
     if (rep_id == -1) return 0;
-    
-    auto result = ExecutiveSetRepVisib(G, selection, rep_id, 0); // state=0 for hide
+
+    auto result = ExecutiveSetRepVisib(G, selection, rep_id, 0);
     return static_cast<bool>(result) ? 1 : 0;
 }
 
@@ -760,17 +758,24 @@ int PyMOLWasm_SetAtomCoordinates(CPyMOL* pymolPtr, const char* selection, int st
     if (!pymolPtr || !in_buffer) return 0;
     PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
     if (!G) return 0;
-    
-    int sele_idx = SelectorIndexByName(G, selection, false);
+
+    SelectorTmp sele(G, selection);
+    int sele_idx = sele.getIndex();
     if (sele_idx < 0) return 0;
-    
-    int atom_count = SelectorCountAtoms(G, sele_idx, state);
-    if (atom_count <= 0) return 0;
-    
-    // Instead of doing complex iteration here for POC, we will stub it to prove the API boundary compiles and links.
-    // In full implementation, we loop: while (ExecutiveIterateObjectMolecule(...) { ObjectMoleculeSetAtomVertex(...) }
-    
-    return atom_count;
+
+    int set_count = 0;
+
+    for (SeleCoordIterator iter(G, sele_idx, state == -1 ? cStateCurrent : state); iter.next();) {
+        float* coords = iter.getCoord();
+        if (coords) {
+            coords[0] = in_buffer[set_count * 3 + 0];
+            coords[1] = in_buffer[set_count * 3 + 1];
+            coords[2] = in_buffer[set_count * 3 + 2];
+            ++set_count;
+        }
+    }
+
+    return set_count;
 }
 
 } // extern "C"

@@ -312,7 +312,8 @@ END`;
 
     // --- TEST 17: Final Structural/Map Commands ---
     console.log("Executing Final Specialized Commands...");
-    const dssRes = module._PyMOLWasm_AssignSS(pymolPtr, allSelPtr, 0, "", 0);
+    const emptyStrPtr = module.stringToNewUTF8("");
+    const dssRes = module._PyMOLWasm_AssignSS(pymolPtr, allSelPtr, 0, emptyStrPtr, 0);
     assert.strictEqual(dssRes, 1, "PyMOLWasm_AssignSS failed");
 
     const fixChemRes = module._PyMOLWasm_FixChemistry(pymolPtr, allSelPtr, allSelPtr, 1);
@@ -339,6 +340,8 @@ END`;
     console.log("✅ Final Specialized Commands passed (no crashes).");
 
     // Cleanup
+    module._free(newCoordsPtr);
+    module._free(emptyStrPtr);
     module._free(outBufferPtr);
     module._free(identityMatrixPtr);
     module._free(vectorPtr);
