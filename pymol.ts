@@ -44,7 +44,7 @@ export interface PyMOLModule extends EmscriptenModuleBase {
 
     // Queries
     _PyMOLWasm_GetAtomCount(pymolPtr: number, selection: number): number;
-    _PyMOLWasm_GetAtomCoordinates(pymolPtr: number, selection: number, outBuffer: number): number;
+    _PyMOLWasm_GetAtomCoordinates(pymolPtr: number, selection: number, outBuffer: number, bufferSize: number): number;
 
     // Camera
     _PyMOLWasm_Zoom(pymolPtr: number, selection: number, buffer: number): number;
@@ -119,21 +119,31 @@ export interface PyMOLModule extends EmscriptenModuleBase {
     _PyMOLWasm_FixChemistry(pymolPtr: number, selection: number, context: number, invalidate: number): number;
 
     // Coordinates
-    _PyMOLWasm_SetAtomCoordinates(pymolPtr: number, selection: number, state: number, inBuffer: number): number;
+    _PyMOLWasm_SetAtomCoordinates(pymolPtr: number, selection: number, state: number, inBuffer: number, bufferSize: number): number;
 }
 
 /** PDB string load format constant (cLoadTypePDBStr) */
 export const LOAD_FORMAT_PDB_STR = 9;
 
+/** Number of floats in a PyMOL scene view */
+export const SCENE_VIEW_SIZE = 25;
+
 /** Valid representation names for show/hide */
 export type RepresentationName = 'lines' | 'spheres' | 'surface' | 'ribbon' | 'cartoon' | 'sticks' | 'mesh' | 'dots';
 
+const textEncoder = new TextEncoder();
+
 /**
- * Helper to allocate a string in WASM memory, call a function, and free it.
- * Returns the allocated pointer. Caller is responsible for freeing.
+ * Allocates a string in WASM memory via stringToNewUTF8.
+ * Throws if allocation fails (returns 0).
+ * Caller is responsible for freeing the returned pointer.
  */
 function allocString(module: PyMOLModule, str: string): number {
-    return module.stringToNewUTF8(str);
+    const ptr = module.stringToNewUTF8(str);
+    if (ptr === 0) {
+        throw new Error(`Failed to allocate WASM string for "${str.slice(0, 50)}"`);
+    }
+    return ptr;
 }
 
 export class PyMOLHeadless {
@@ -160,6 +170,10 @@ export class PyMOLHeadless {
      * @param createPyMOL The factory function exported by Emscripten (e.g., from pymol_wasm.js)
      */
     async init(createPyMOL: (moduleArgs?: Partial<PyMOLModule>) => Promise<PyMOLModule>) {
+        if (this.module !== null) {
+            throw new Error("PyMOL already initialized — call destroy() first");
+        }
+
         this.module = await createPyMOL({
             noInitialRun: true,
             print: (text: string) => console.log('[PyMOL]', text),
@@ -174,10 +188,19 @@ export class PyMOLHeadless {
         this.pymolPtr = this.module._PyMOL_NewWithOptions(this.optionsPtr);
         if (this.pymolPtr === 0) {
             this.module._PyMOLOptions_Free(this.optionsPtr);
+            this.optionsPtr = 0;
             throw new Error("Failed to create PyMOL instance.");
         }
 
-        this.module._PyMOL_Start(this.pymolPtr);
+        try {
+            this.module._PyMOL_Start(this.pymolPtr);
+        } catch (e) {
+            this.module._PyMOL_Free(this.pymolPtr);
+            this.module._PyMOLOptions_Free(this.optionsPtr);
+            this.pymolPtr = 0;
+            this.optionsPtr = 0;
+            throw e;
+        }
     }
 
     /**
@@ -191,12 +214,16 @@ export class PyMOLHeadless {
         const m = this.getModule();
         const p = this.getInstancePtr();
         const namePtr = allocString(m, objectName);
-        const contentPtr = allocString(m, content);
         try {
-            return m._PyMOLWasm_Load(p, namePtr, contentPtr, content.length, format) === 1;
+            const contentPtr = allocString(m, content);
+            try {
+                const byteLength = textEncoder.encode(content).byteLength;
+                return m._PyMOLWasm_Load(p, namePtr, contentPtr, byteLength, format) === 1;
+            } finally {
+                m._free(contentPtr);
+            }
         } finally {
             m._free(namePtr);
-            m._free(contentPtr);
         }
     }
 
@@ -207,12 +234,15 @@ export class PyMOLHeadless {
         const m = this.getModule();
         const p = this.getInstancePtr();
         const repPtr = allocString(m, rep);
-        const selPtr = allocString(m, selection);
         try {
-            return m._PyMOLWasm_Show(p, repPtr, selPtr) === 1;
+            const selPtr = allocString(m, selection);
+            try {
+                return m._PyMOLWasm_Show(p, repPtr, selPtr) === 1;
+            } finally {
+                m._free(selPtr);
+            }
         } finally {
             m._free(repPtr);
-            m._free(selPtr);
         }
     }
 
@@ -223,12 +253,15 @@ export class PyMOLHeadless {
         const m = this.getModule();
         const p = this.getInstancePtr();
         const repPtr = allocString(m, rep);
-        const selPtr = allocString(m, selection);
         try {
-            return m._PyMOLWasm_Hide(p, repPtr, selPtr) === 1;
+            const selPtr = allocString(m, selection);
+            try {
+                return m._PyMOLWasm_Hide(p, repPtr, selPtr) === 1;
+            } finally {
+                m._free(selPtr);
+            }
         } finally {
             m._free(repPtr);
-            m._free(selPtr);
         }
     }
 
@@ -239,12 +272,15 @@ export class PyMOLHeadless {
         const m = this.getModule();
         const p = this.getInstancePtr();
         const colorPtr = allocString(m, colorName);
-        const selPtr = allocString(m, selection);
         try {
-            return m._PyMOLWasm_Color(p, colorPtr, selPtr) === 1;
+            const selPtr = allocString(m, selection);
+            try {
+                return m._PyMOLWasm_Color(p, colorPtr, selPtr) === 1;
+            } finally {
+                m._free(selPtr);
+            }
         } finally {
             m._free(colorPtr);
-            m._free(selPtr);
         }
     }
 
@@ -269,16 +305,52 @@ export class PyMOLHeadless {
         const m = this.getModule();
         const p = this.getInstancePtr();
         const selPtr = allocString(m, selection);
-        const count = m._PyMOLWasm_GetAtomCount(p, selPtr);
-        const bufferSize = count * 3 * 4; // 3 floats * 4 bytes
-        const bufPtr = m._malloc(bufferSize);
         try {
-            const extracted = m._PyMOLWasm_GetAtomCoordinates(p, selPtr, bufPtr);
-            const result = new Float32Array(extracted * 3);
-            result.set(new Float32Array(m.HEAPF32.buffer, bufPtr, extracted * 3));
-            return result;
+            const count = m._PyMOLWasm_GetAtomCount(p, selPtr);
+            if (count <= 0) return new Float32Array(0);
+
+            const bufferFloats = count * 3;
+            const bufPtr = m._malloc(bufferFloats * 4);
+            if (bufPtr === 0) throw new Error("Failed to allocate coordinate buffer");
+            try {
+                const extracted = m._PyMOLWasm_GetAtomCoordinates(p, selPtr, bufPtr, bufferFloats);
+                const result = new Float32Array(extracted * 3);
+                result.set(new Float32Array(m.HEAPF32.buffer, bufPtr, extracted * 3));
+                return result;
+            } finally {
+                m._free(bufPtr);
+            }
         } finally {
-            m._free(bufPtr);
+            m._free(selPtr);
+        }
+    }
+
+    /**
+     * Sets atom coordinates from a Float32Array [x1,y1,z1, x2,y2,z2, ...].
+     * @param coords Flat array of xyz coordinates (length must be divisible by 3).
+     * @param selection Selection to set coordinates for.
+     * @param state State index (-1 for current).
+     * @returns Number of atoms successfully updated.
+     */
+    setAtomCoordinates(coords: Float32Array, selection: string = "all", state: number = -1): number {
+        if (coords.length === 0) return 0;
+        if (coords.length % 3 !== 0) {
+            throw new Error(`Coordinate array length ${coords.length} is not divisible by 3`);
+        }
+
+        const m = this.getModule();
+        const p = this.getInstancePtr();
+        const selPtr = allocString(m, selection);
+        try {
+            const bufPtr = m._malloc(coords.byteLength);
+            if (bufPtr === 0) throw new Error("Failed to allocate coordinate buffer");
+            try {
+                new Float32Array(m.HEAPF32.buffer, bufPtr, coords.length).set(coords);
+                return m._PyMOLWasm_SetAtomCoordinates(p, selPtr, state, bufPtr, coords.length);
+            } finally {
+                m._free(bufPtr);
+            }
+        } finally {
             m._free(selPtr);
         }
     }
@@ -360,12 +432,146 @@ export class PyMOLHeadless {
         const m = this.getModule();
         const p = this.getInstancePtr();
         const tPtr = allocString(m, target);
-        const mPtr = allocString(m, mobile);
         try {
-            return m._PyMOLWasm_Align(p, tPtr, mPtr);
+            const mPtr = allocString(m, mobile);
+            try {
+                return m._PyMOLWasm_Align(p, tPtr, mPtr);
+            } finally {
+                m._free(mPtr);
+            }
         } finally {
             m._free(tPtr);
-            m._free(mPtr);
+        }
+    }
+
+    /**
+     * Gets the distance between two selections. Returns -1 on failure.
+     */
+    getDistance(sel1: string, sel2: string): number {
+        const m = this.getModule();
+        const p = this.getInstancePtr();
+        const s1Ptr = allocString(m, sel1);
+        try {
+            const s2Ptr = allocString(m, sel2);
+            try {
+                return m._PyMOLWasm_GetDistance(p, s1Ptr, s2Ptr);
+            } finally {
+                m._free(s2Ptr);
+            }
+        } finally {
+            m._free(s1Ptr);
+        }
+    }
+
+    /**
+     * Gets the angle between three selections (in degrees). Returns -1 on failure.
+     */
+    getAngle(sel1: string, sel2: string, sel3: string): number {
+        const m = this.getModule();
+        const p = this.getInstancePtr();
+        const ptrs: number[] = [];
+        try {
+            ptrs.push(allocString(m, sel1));
+            ptrs.push(allocString(m, sel2));
+            ptrs.push(allocString(m, sel3));
+            return m._PyMOLWasm_GetAngle(p, ptrs[0], ptrs[1], ptrs[2]);
+        } finally {
+            for (const ptr of ptrs) m._free(ptr);
+        }
+    }
+
+    /**
+     * Gets the dihedral angle between four selections (in degrees). Returns -1 on failure.
+     */
+    getDihedral(sel1: string, sel2: string, sel3: string, sel4: string): number {
+        const m = this.getModule();
+        const p = this.getInstancePtr();
+        const ptrs: number[] = [];
+        try {
+            ptrs.push(allocString(m, sel1));
+            ptrs.push(allocString(m, sel2));
+            ptrs.push(allocString(m, sel3));
+            ptrs.push(allocString(m, sel4));
+            return m._PyMOLWasm_GetDihedral(p, ptrs[0], ptrs[1], ptrs[2], ptrs[3]);
+        } finally {
+            for (const ptr of ptrs) m._free(ptr);
+        }
+    }
+
+    /**
+     * Gets the solvent accessible surface area for a selection. Returns -1 on failure.
+     */
+    getArea(selection: string = "all"): number {
+        const m = this.getModule();
+        const p = this.getInstancePtr();
+        const selPtr = allocString(m, selection);
+        try {
+            return m._PyMOLWasm_GetArea(p, selPtr);
+        } finally {
+            m._free(selPtr);
+        }
+    }
+
+    /**
+     * Gets the current scene view as a Float32Array of 25 floats.
+     */
+    getView(): Float32Array {
+        const m = this.getModule();
+        const p = this.getInstancePtr();
+        const bufPtr = m._malloc(SCENE_VIEW_SIZE * 4);
+        if (bufPtr === 0) throw new Error("Failed to allocate view buffer");
+        try {
+            const ok = m._PyMOLWasm_GetView(p, bufPtr);
+            if (!ok) throw new Error("GetView failed");
+            const result = new Float32Array(SCENE_VIEW_SIZE);
+            result.set(new Float32Array(m.HEAPF32.buffer, bufPtr, SCENE_VIEW_SIZE));
+            return result;
+        } finally {
+            m._free(bufPtr);
+        }
+    }
+
+    /**
+     * Sets the scene view from a Float32Array of 25 floats.
+     */
+    setView(view: Float32Array): boolean {
+        if (view.length !== SCENE_VIEW_SIZE) {
+            throw new Error(`View array must have ${SCENE_VIEW_SIZE} elements, got ${view.length}`);
+        }
+        const m = this.getModule();
+        const p = this.getInstancePtr();
+        const bufPtr = m._malloc(SCENE_VIEW_SIZE * 4);
+        if (bufPtr === 0) throw new Error("Failed to allocate view buffer");
+        try {
+            new Float32Array(m.HEAPF32.buffer, bufPtr, SCENE_VIEW_SIZE).set(view);
+            return m._PyMOLWasm_SetView(p, bufPtr) === 1;
+        } finally {
+            m._free(bufPtr);
+        }
+    }
+
+    /**
+     * Gets the bounding box extent of a selection.
+     * Returns [minX, minY, minZ, maxX, maxY, maxZ] or null on failure.
+     */
+    getExtent(selection: string = "all"): Float32Array | null {
+        const m = this.getModule();
+        const p = this.getInstancePtr();
+        const selPtr = allocString(m, selection);
+        try {
+            const bufPtr = m._malloc(6 * 4);
+            if (bufPtr === 0) throw new Error("Failed to allocate extent buffer");
+            try {
+                const ok = m._PyMOLWasm_GetExtent(p, selPtr, bufPtr);
+                if (!ok) return null;
+                const result = new Float32Array(6);
+                result.set(new Float32Array(m.HEAPF32.buffer, bufPtr, 6));
+                return result;
+            } finally {
+                m._free(bufPtr);
+            }
+        } finally {
+            m._free(selPtr);
         }
     }
 
@@ -381,11 +587,16 @@ export class PyMOLHeadless {
      * Free resources when done.
      */
     destroy() {
-        if (this.module && this.pymolPtr) {
-            this.module._PyMOL_Free(this.pymolPtr);
-            this.module._PyMOLOptions_Free(this.optionsPtr);
-            this.pymolPtr = 0;
-            this.optionsPtr = 0;
+        if (this.module) {
+            if (this.pymolPtr) {
+                this.module._PyMOL_Free(this.pymolPtr);
+                this.pymolPtr = 0;
+            }
+            if (this.optionsPtr) {
+                this.module._PyMOLOptions_Free(this.optionsPtr);
+                this.optionsPtr = 0;
+            }
+            this.module = null;
         }
     }
 }

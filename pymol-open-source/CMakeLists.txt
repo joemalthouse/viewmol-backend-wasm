@@ -2,6 +2,13 @@ cmake_minimum_required(VERSION 3.13)
 project(pymol_wasm)
 
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Default to Release if no build type specified (allows debug builds via -DCMAKE_BUILD_TYPE=Debug)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
 
 add_compile_definitions(
     _PYMOL_NOPY
@@ -42,11 +49,13 @@ file(GLOB_RECURSE SRC_FILES
     "build/generated/*.cpp"
 )
 
-# Remove files that require specific dependencies or are strictly Python modules if necessary
-# list(REMOVE_ITEM SRC_FILES "${CMAKE_CURRENT_SOURCE_DIR}/layer0/ccealignmodule.cpp")
+# Emscripten compile flags
+# -Wno-narrowing: required by upstream PyMOL code (implicit float-to-int conversions in legacy layers)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -s USE_LIBPNG=1 -s USE_FREETYPE=1 -Wno-narrowing")
 
-# Emscripten specific link flags
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -s USE_LIBPNG=1 -s USE_FREETYPE=1 -Wno-narrowing")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --no-entry -s ERROR_ON_UNDEFINED_SYMBOLS=0 -s ALLOW_MEMORY_GROWTH=1 -s MODULARIZE=1 -s EXPORT_NAME=\"createPyMOL\" -s EXPORTED_RUNTIME_METHODS=\"['ccall', 'cwrap', 'stringToNewUTF8']\" -s USE_LIBPNG=1 -s USE_FREETYPE=1 -s USE_WEBGL2=1 -s LEGACY_GL_EMULATION=1 -lGL -s EXPORTED_FUNCTIONS=\"['_PyMOLOptions_New','_PyMOL_NewWithOptions','_PyMOL_Start','_PyMOL_Free','_PyMOLOptions_Free','_PyMOLWasm_Load','_PyMOLWasm_Show','_PyMOLWasm_Hide','_PyMOLWasm_Zoom','_PyMOLWasm_Center','_PyMOLWasm_Origin','_PyMOLWasm_Delete','_PyMOLWasm_Remove','_PyMOLWasm_Color','_PyMOLWasm_GetAtomCount','_PyMOLWasm_GetAtomCoordinates','_PyMOLWasm_Align','_PyMOLWasm_GetDistance','_PyMOLWasm_GetAngle','_PyMOLWasm_GetDihedral','_PyMOLWasm_GetArea','_PyMOLWasm_GetView','_PyMOLWasm_SetView','_PyMOLWasm_SetSetting','_PyMOLWasm_Isomesh','_PyMOLWasm_SymExp','_PyMOLWasm_CreateObject','_PyMOLWasm_MPlay','_PyMOLWasm_MStop','_PyMOLWasm_SetFrame','_PyMOLWasm_GetState','_PyMOLWasm_GetFrame','_PyMOLWasm_TransformObject','_PyMOLWasm_TransformSelection','_PyMOLWasm_TranslateAtom','_PyMOLWasm_ResetMatrix','_PyMOLWasm_Bond','_PyMOLWasm_Unbond','_PyMOLWasm_Fuse','_PyMOLWasm_Copy','_PyMOLWasm_MapNew','_PyMOLWasm_Spectrum','_PyMOLWasm_RampNew','_PyMOLWasm_Select','_PyMOLWasm_SceneStore','_PyMOLWasm_SceneRecall','_PyMOLWasm_MovieClear','_PyMOLWasm_GetExtent','_PyMOLWasm_AssignSS','_PyMOLWasm_FixChemistry','_PyMOLWasm_MapDouble','_PyMOLWasm_MapHalve','_PyMOLWasm_MapTrim','_PyMOLWasm_SetAtomCoordinates','_malloc','_free']\"")
+# Emscripten link flags
+# LEGACY_GL_EMULATION: required by upstream PyMOL — it uses OpenGL 1.x fixed-function calls
+# INITIAL_MEMORY/MAXIMUM_MEMORY: 64MB initial, 512MB cap — prevents unbounded growth
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --no-entry -s ERROR_ON_UNDEFINED_SYMBOLS=1 -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=67108864 -s MAXIMUM_MEMORY=536870912 -s MODULARIZE=1 -s EXPORT_NAME=\"createPyMOL\" -s EXPORTED_RUNTIME_METHODS=\"['ccall', 'cwrap', 'stringToNewUTF8']\" -s USE_LIBPNG=1 -s USE_FREETYPE=1 -s USE_WEBGL2=1 -s LEGACY_GL_EMULATION=1 -lGL -s EXPORTED_FUNCTIONS=\"['_PyMOLOptions_New','_PyMOL_NewWithOptions','_PyMOL_Start','_PyMOL_Free','_PyMOLOptions_Free','_PyMOLWasm_Load','_PyMOLWasm_Show','_PyMOLWasm_Hide','_PyMOLWasm_Zoom','_PyMOLWasm_Center','_PyMOLWasm_Origin','_PyMOLWasm_Delete','_PyMOLWasm_Remove','_PyMOLWasm_Color','_PyMOLWasm_GetAtomCount','_PyMOLWasm_GetAtomCoordinates','_PyMOLWasm_Align','_PyMOLWasm_GetDistance','_PyMOLWasm_GetAngle','_PyMOLWasm_GetDihedral','_PyMOLWasm_GetArea','_PyMOLWasm_GetView','_PyMOLWasm_SetView','_PyMOLWasm_SetSetting','_PyMOLWasm_Isomesh','_PyMOLWasm_SymExp','_PyMOLWasm_CreateObject','_PyMOLWasm_MPlay','_PyMOLWasm_MStop','_PyMOLWasm_SetFrame','_PyMOLWasm_GetState','_PyMOLWasm_GetFrame','_PyMOLWasm_TransformObject','_PyMOLWasm_TransformSelection','_PyMOLWasm_TranslateAtom','_PyMOLWasm_ResetMatrix','_PyMOLWasm_Bond','_PyMOLWasm_Unbond','_PyMOLWasm_Fuse','_PyMOLWasm_Copy','_PyMOLWasm_MapNew','_PyMOLWasm_Spectrum','_PyMOLWasm_RampNew','_PyMOLWasm_Select','_PyMOLWasm_SceneStore','_PyMOLWasm_SceneRecall','_PyMOLWasm_MovieClear','_PyMOLWasm_GetExtent','_PyMOLWasm_AssignSS','_PyMOLWasm_FixChemistry','_PyMOLWasm_MapDouble','_PyMOLWasm_MapHalve','_PyMOLWasm_MapTrim','_PyMOLWasm_SetAtomCoordinates','_malloc','_free']\"")
 
 add_executable(pymol_wasm ${SRC_FILES})
