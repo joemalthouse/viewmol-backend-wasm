@@ -191,52 +191,97 @@ Every atom has these modifiable fields:
 | `inscode` | `char` | Insertion code |
 | `stereo` | `unsigned char:2` | Stereochemistry |
 
-Note: String properties (segi, chain, resn, name) use `lexidx_t` — a lexicon index, not a raw string. Setting them requires `LexAssign(G, ai->field, "value")`.
+Note: String properties (segi, chain, resn, name) use `lexidx_t` — a lexicon index, not a raw string. Setting them requires `LexAssign(G, ai->field, "value")`. The Lex subsystem is a pure C++ string interning table — works fine without Python.
+
+### The Native `alter` Implementation (fully traced)
+
+**Full call chain:**
+```
+ExecutiveIterate(G, selection, expr, read_only=0, quiet, space)
+  → SelectorTmp(G, selection)         // resolve selection to sele_idx
+  → op.code = OMOP_ALTR              // same opcode for alter (read_only=0) and iterate (read_only=1)
+  → ExecutiveObjMolSeleOp(G, sele, &op)
+    → ObjectMolecule::seleOp()        // iterates all atoms in object
+      → for each atom: SelectorIsMember(G, ai->selEntry, sele)
+        → case OMOP_ALTR:
+          → PAlterAtom(G, obj, cs, expr_co, read_only, atm, space)
+            → PAlterAtomState(G, expr_co, read_only, obj, cs, atm, idx, state, space)
+              → PyEval_EvalCode(expr_co, space, wobj)   // Python eval per atom!
+```
+
+The expression string (e.g., `"b=50.0"`) is compiled once with `Py_CompileString`, then `PyEval_EvalCode` runs for **every matching atom**. A `WrapperObject` acts as a Python dict — when the expression reads `b`, `WrapperObjectSubScript` maps it to `AtomInfoType.b`; when it writes `b=50`, `WrapperObjectAssignSubScript` writes into the struct field.
+
+In the WASM build (`_PYMOL_NOPY` defined), the `OMOP_ALTR` case has all Python code `#ifdef`'d out and falls through to `ok = false`. **`alter` is completely non-functional in the WASM build.**
+
+### The Property Mapping Infrastructure
+
+**`AtomPropertyInfos[]`** — defined in `layer5/PyMOL.cpp:663-705` via `LEX_ATOM_PROP` macro. Each entry stores `{id, Ptype, offset, maxlen}`. The function `PyMOL_GetAtomPropertyInfo()` (PyMOL.cpp:3241) resolves property names to `AtomPropertyInfo*`. **This works in the WASM build** — no Python dependency.
+
+Property types (Ptype enum):
+| Ptype | Fields | Example |
+|---|---|---|
+| `cPType_float` | b, q, vdw, elec_radius, partialCharge | `b=50.0` |
+| `cPType_int` | color, id, rank, resv | `color=4` |
+| `cPType_schar` | formalCharge, geom, valence, cartoon, protons | `cartoon=1` |
+| `cPType_uint32` | flags | `flags=0x01` |
+| `cPType_int_as_string` | name, resn, chain, segi, custom, label, textType | via `LexAssign()` |
+| `cPType_string` | elem (char[5]), ssType (char[2]), alt (char[2]) | direct char copy |
+| `cPType_xyz_float` | x, y, z (in CoordSet) | only `alter_state` |
+
+### Critical Side Effects After Modification
+
+From `WrapperObjectAssignSubScript` (layer5/PyMOL.cpp:1049-1064):
+- **`elem`**: Must call `AtomInfoAssignParameters(G, ai)` — resets `protons` and `vdw` from element
+- **`resv`**: Must clear `inscode` (set to `'\0'`)
+- **`ss`**: Must uppercase the first character
+- **`formal_charge`**: Must clear `chemFlag` (set to 0)
+- **General**: After modification, call `ObjectMolecule::invalidate()` and `SeqChanged(G)`
 
 ### Existing Precedent: SetAtomCoordinates
 
-`PyMOLWasm_SetAtomCoordinates` (PyMOLWasm.cpp:916-941) iterates atoms via `SeleCoordIterator` and writes coordinates. An `alter`-like function would use the same `SeleCoordIterator` pattern but write to `AtomInfoType` fields instead.
+`PyMOLWasm_SetAtomCoordinates` (PyMOLWasm.cpp:916-941) iterates atoms via `SeleCoordIterator` and writes coordinates. For atom properties, `SeleAtomIterator` (layer3/AtomIterators.h:122) is the correct iterator — it provides `getAtomInfo()` returning `AtomInfoType*` directly.
 
 ### What Can Be Implemented
 
-**Option A: Property-specific functions** (simplest)
+**Recommended approach: Three typed functions** (simplest, covers all cases)
+
 ```cpp
-// Example: SetBFactor(pymol, "chain A", 50.0)
-int PyMOLWasm_SetBFactor(CPyMOL* pymolPtr, const char* selection, float value) {
-    // iterate matching atoms, set ai->b = value
-}
+// Float properties: b, q, vdw, elec_radius, partial_charge
+int PyMOLWasm_SetAtomPropertyFloat(CPyMOL* pymolPtr, const char* selection,
+                                     int property_id, float value);
+
+// Int properties: color, ID, rank, flags, resv, cartoon, geom, valence, protons
+int PyMOLWasm_SetAtomPropertyInt(CPyMOL* pymolPtr, const char* selection,
+                                   int property_id, int value);
+
+// String properties: name, resn, chain, segi, elem, ss, alt, label, custom
+int PyMOLWasm_SetAtomPropertyString(CPyMOL* pymolPtr, const char* selection,
+                                      int property_id, const char* value);
 ```
-Pro: Type-safe, simple. Con: One function per property = API bloat.
 
-**Option B: Generic SetAtomProperty with enum** (recommended)
-```cpp
-enum AtomProperty { kPropB, kPropQ, kPropVdw, kPropColor, kPropCharge, ... };
-int PyMOLWasm_SetAtomProperty(CPyMOL* pymolPtr, const char* selection,
-                               int property, float value);
-int PyMOLWasm_SetAtomPropertyStr(CPyMOL* pymolPtr, const char* selection,
-                                  int property, const char* value);
-```
-Pro: Single function covers all properties. Con: Need separate float/string variants.
+Each function would:
+1. Create `SelectorTmp` from selection
+2. Use `SeleAtomIterator` to walk matching atoms
+3. Look up `AtomPropertyInfos[property_id]` for offset and type
+4. Write the value directly into `AtomInfoType` fields
+5. Apply side effects (elem→`AtomInfoAssignParameters`, ss→uppercase, etc.)
+6. Call `ObjectMolecule::invalidate()` and `SeqChanged(G)`
 
-**Option C: Re-enable ExecutiveIterate with a non-Python evaluator** (most complete)
-
-The WASM build already uses `cExecutiveLabelEvalAlt` in `PyMOLWasm_Label` — an alternate expression evaluator that doesn't need Python. A similar alternate evaluator for `alter` would support simple assignments like `b=50.0` or `chain='B'` without CPython.
-
-This would require writing a mini-expression parser in C++ that handles:
-- `b=50.0`, `q=1.0`, `color=4` (numeric assignments)
-- `chain='A'`, `resn='ALA'`, `name='CA'` (string assignments)
-- `ss='H'`, `elem='C'` (short string assignments)
-
-**Difficulty: Medium.** The iterator infrastructure exists; the gap is the expression evaluator. Option B is ~50 lines per property for a dozen properties. Option C is ~200-300 lines for a mini-parser.
+**Difficulty: Medium.** ~100-150 lines total for all three functions, plus ~30 lines for side-effect handling. The iterator and property infrastructure already exists — no new evaluator needed.
 
 ### Read-Only Iteration (iterate)
 
-For read-only queries, the WASM API needs functions that return atom property data:
+For read-only queries, matching functions:
 ```cpp
-int PyMOLWasm_GetAtomProperty(CPyMOL* pymolPtr, const char* selection,
-                               int property, float* out_buffer, int buffer_size);
+int PyMOLWasm_GetAtomPropertyFloat(CPyMOL* pymolPtr, const char* selection,
+                                     int property_id, float* out_buffer, int buffer_size);
+int PyMOLWasm_GetAtomPropertyInt(CPyMOL* pymolPtr, const char* selection,
+                                   int property_id, int* out_buffer, int buffer_size);
+// String properties → JSON array via malloc'd buffer (like GetRayScene pattern)
+int PyMOLWasm_GetAtomPropertyString(CPyMOL* pymolPtr, const char* selection,
+                                      int property_id, char** out_ptr);
 ```
-This follows the exact pattern of `GetAtomCoordinates` but reads from `AtomInfoType` fields instead of `CoordSet`.
+These follow the exact pattern of `GetAtomCoordinates` but read from `AtomInfoType` fields via `SeleAtomIterator` instead of `SeleCoordIterator`.
 
 ---
 
