@@ -293,10 +293,15 @@ export class PyMOLHeadless {
         const p = this.getInstancePtr();
         const namePtr = allocString(m, objectName);
         try {
-            const contentPtr = allocString(m, content);
+            // Encode once, write directly to WASM memory (avoids double-encode
+            // from stringToNewUTF8 + textEncoder.encode for byte length).
+            const encoded = textEncoder.encode(content);
+            const contentPtr = m._malloc(encoded.length + 1);
+            if (contentPtr === 0) throw new Error("Failed to allocate content buffer");
             try {
-                const byteLength = textEncoder.encode(content).byteLength;
-                return m._PyMOLWasm_Load(p, namePtr, contentPtr, byteLength, format) === 1;
+                m.HEAPU8.set(encoded, contentPtr);
+                m.HEAPU8[contentPtr + encoded.length] = 0;
+                return m._PyMOLWasm_Load(p, namePtr, contentPtr, encoded.length, format) === 1;
             } finally {
                 m._free(contentPtr);
             }
@@ -687,11 +692,14 @@ export class PyMOLHeadless {
         const m = this.getModule();
         const p = this.getInstancePtr();
         const valPtr = allocString(m, value);
-        const selPtr = allocString(m, selection || '');
         try {
-            return m._PyMOLWasm_SetSettingString(p, settingIndex, valPtr, selPtr) === 1;
+            const selPtr = allocString(m, selection || '');
+            try {
+                return m._PyMOLWasm_SetSettingString(p, settingIndex, valPtr, selPtr) === 1;
+            } finally {
+                m._free(selPtr);
+            }
         } finally {
-            m._free(selPtr);
             m._free(valPtr);
         }
     }
@@ -705,11 +713,14 @@ export class PyMOLHeadless {
         const m = this.getModule();
         const p = this.getInstancePtr();
         const selPtr = allocString(m, selection);
-        const exprPtr = allocString(m, expression);
         try {
-            return m._PyMOLWasm_Label(p, selPtr, exprPtr) === 1;
+            const exprPtr = allocString(m, expression);
+            try {
+                return m._PyMOLWasm_Label(p, selPtr, exprPtr) === 1;
+            } finally {
+                m._free(exprPtr);
+            }
         } finally {
-            m._free(exprPtr);
             m._free(selPtr);
         }
     }
@@ -721,13 +732,19 @@ export class PyMOLHeadless {
         const m = this.getModule();
         const p = this.getInstancePtr();
         const namePtr = allocString(m, name);
-        const s1Ptr = allocString(m, sel1);
-        const s2Ptr = allocString(m, sel2);
         try {
-            return m._PyMOLWasm_Distance(p, namePtr, s1Ptr, s2Ptr, mode) === 1;
+            const s1Ptr = allocString(m, sel1);
+            try {
+                const s2Ptr = allocString(m, sel2);
+                try {
+                    return m._PyMOLWasm_Distance(p, namePtr, s1Ptr, s2Ptr, mode) === 1;
+                } finally {
+                    m._free(s2Ptr);
+                }
+            } finally {
+                m._free(s1Ptr);
+            }
         } finally {
-            m._free(s2Ptr);
-            m._free(s1Ptr);
             m._free(namePtr);
         }
     }

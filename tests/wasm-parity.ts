@@ -351,7 +351,7 @@ async function generateWasmScene(
     testCase: WasmParityCase,
     width: number,
     height: number,
-    createPyMOL: (args: Partial<PyMOLModule>) => Promise<PyMOLModule>,
+    createPyMOL: (args?: Partial<PyMOLModule>) => Promise<PyMOLModule>,
     nativeView?: number[],
 ): Promise<string> {
     const pymol = new PyMOLHeadless();
@@ -626,7 +626,7 @@ async function run(): Promise<void> {
             await page.waitForTimeout(500);
         }
 
-        const gpuCheck = await page.evaluate('({ ready: window.__gpuRendererReady === true, hasRender: typeof window.renderSceneJSON === "function" })');
+        const gpuCheck = await page.evaluate('({ ready: window.__gpuRendererReady === true, hasRender: typeof window.renderSceneJSON === "function" })') as { ready: boolean; hasRender: boolean };
         console.log(`GPU renderer: ready=${gpuCheck.ready}, render=${gpuCheck.hasRender}`);
         if (!gpuCheck.ready || !gpuCheck.hasRender) {
             throw new Error('GPU renderer page did not initialize');

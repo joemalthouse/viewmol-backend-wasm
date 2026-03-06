@@ -259,7 +259,9 @@ function testMapsAndSelections(module: PyMOLModule, pymolPtr: number) {
                     withString(module, "my_ramp", (rampNamePtr) => {
                         module._PyMOLWasm_MapNew(pymolPtr, mapNamePtr, 0, 1.0, selPtr, 1.0, -1);
                         assert.strictEqual(module._PyMOLWasm_Select(pymolPtr, selNamePtr, selPtr), 1, "Select failed");
-                        assert.strictEqual(module._PyMOLWasm_Spectrum(pymolPtr, selNamePtr, exprPtr, 0.0, 100.0), 1, "Spectrum failed");
+                        withString(module, "rainbow", (palettePtr) => {
+                            assert.strictEqual(module._PyMOLWasm_Spectrum(pymolPtr, selNamePtr, exprPtr, palettePtr, 0.0, 100.0), 1, "Spectrum failed");
+                        });
 
                         withBuffer(module, 2 * bytesPerFloat, (rangePtr) => {
                             new Float32Array(module.HEAPF32.buffer, rangePtr, 2).set([0.0, 1.0]);
@@ -310,13 +312,16 @@ function testGetRayScene(module: PyMOLModule, pymolPtr: number) {
                     module._PyMOLWasm_Show(pymolPtr, repPtr, selPtr);
                     module._PyMOLWasm_Zoom(pymolPtr, selPtr, 0);
 
-                    // Allocate a 2MB buffer for the JSON output
-                    const bufSize = 2 * 1024 * 1024;
-                    withBuffer(module, bufSize, (bufPtr) => {
-                        const result = module._PyMOLWasm_GetRayScene(pymolPtr, 640, 480, bufPtr, bufSize);
+                    // Allocate a pointer-sized slot to receive the output buffer address
+                    withBuffer(module, 4, (outPtrPtr) => {
+                        module.HEAP32[outPtrPtr >> 2] = 0;
+                        const result = module._PyMOLWasm_GetRayScene(pymolPtr, 640, 480, outPtrPtr, 0);
                         assert.ok(result > 0, `GetRayScene should return positive length, got ${result}`);
 
+                        const bufPtr = module.HEAP32[outPtrPtr >> 2];
+                        assert.ok(bufPtr !== 0, "GetRayScene should return non-null buffer");
                         const jsonStr = module.UTF8ToString(bufPtr);
+                        module._free(bufPtr);
                         assert.ok(jsonStr.length > 0, "JSON string should be non-empty");
 
                         const scene = JSON.parse(jsonStr);
@@ -392,9 +397,9 @@ function testFinalSpecializedCommands(module: PyMOLModule, pymolPtr: number) {
 
 async function runTests() {
     console.log("Loading PyMOL WebAssembly module for testing...");
-    const wasmPath = './pymol-open-source/pymol_wasm.js';
-    const createPyMOLModule = await import(wasmPath) as { default?: (args: Partial<PyMOLModule>) => Promise<PyMOLModule> };
-    const createPyMOL = createPyMOLModule.default ?? (createPyMOLModule as unknown as (args: Partial<PyMOLModule>) => Promise<PyMOLModule>);
+    const { createRequire } = await import('module');
+    const require = createRequire(import.meta.url);
+    const createPyMOL = require('./load-wasm.cjs') as (args: Partial<PyMOLModule>) => Promise<PyMOLModule>;
 
     const module = await createPyMOL({
         print: (text: string) => console.log('[PyMOL]', text),

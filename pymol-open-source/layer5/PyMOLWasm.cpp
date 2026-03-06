@@ -59,22 +59,29 @@ static int rep_name_to_id(const char* rep_name) {
 }
 
 /**
+ * Appends a JSON-escaped string (with surrounding quotes) to the output.
+ */
+static void json_escape_append(std::string& json, const char* s) {
+    json += '"';
+    if (s) {
+        while (*s) {
+            if (*s == '"' || *s == '\\') json += '\\';
+            json += *s++;
+        }
+    }
+    json += '"';
+}
+
+/**
  * Serializes a vector of C-strings to a JSON array string.
  */
 static std::string cstr_vec_to_json(const std::vector<const char*>& items) {
     std::string json = "[";
     for (size_t i = 0; i < items.size(); i++) {
-        if (i > 0) json += ",";
-        json += "\"";
-        const char* s = items[i] ? items[i] : "";
-        while (*s) {
-            if (*s == '"' || *s == '\\') json += '\\';
-            json += *s;
-            s++;
-        }
-        json += "\"";
+        if (i > 0) json += ',';
+        json_escape_append(json, items[i]);
     }
-    json += "]";
+    json += ']';
     return json;
 }
 
@@ -1919,16 +1926,8 @@ int PyMOLWasm_GetAtomPropertyString(CPyMOL* pymolPtr, const char* selection,
             str_val = (const char*)ai + info->offset;
         }
 
-        if (count > 0) json += ",";
-        json += "\"";
-        // Escape any quotes or backslashes in the string value
-        const char* s = str_val ? str_val : "";
-        while (*s) {
-            if (*s == '"' || *s == '\\') json += '\\';
-            json += *s;
-            s++;
-        }
-        json += "\"";
+        if (count > 0) json += ',';
+        json_escape_append(json, str_val);
         count++;
     }
     json += "]";
@@ -2053,15 +2052,10 @@ int PyMOLWasm_GetSceneList(CPyMOL* pymolPtr, char** out_ptr) {
     const auto& order = MovieSceneGetOrder(G);
     std::string json = "[";
     for (size_t i = 0; i < order.size(); i++) {
-        if (i > 0) json += ",";
-        json += "\"";
-        for (char c : order[i]) {
-            if (c == '"' || c == '\\') json += '\\';
-            json += c;
-        }
-        json += "\"";
+        if (i > 0) json += ',';
+        json_escape_append(json, order[i].c_str());
     }
-    json += "]";
+    json += ']';
 
     alloc_output_string(json, out_ptr);
     return static_cast<int>(order.size());

@@ -52,16 +52,24 @@ inline void jFloat(std::string& o, float v)
 
 inline void jInt(std::string& o, int v)
 {
-  char buf[32];
-  int n = std::snprintf(buf, sizeof(buf), "%d", v);
-  o.append(buf, n > 0 ? static_cast<std::size_t>(n) : 1);
+  if (v == 0) { o += '0'; return; }
+  char buf[12]; // -2147483648 is 11 chars + nul
+  int pos = 11;
+  bool neg = v < 0;
+  unsigned int uv = neg ? static_cast<unsigned int>(-(v + 1)) + 1u
+                        : static_cast<unsigned int>(v);
+  while (uv > 0) { buf[pos--] = '0' + static_cast<char>(uv % 10); uv /= 10; }
+  if (neg) buf[pos--] = '-';
+  o.append(buf + pos + 1, static_cast<std::size_t>(11 - pos));
 }
 
 inline void jUint(std::string& o, std::uint32_t v)
 {
-  char buf[32];
-  int n = std::snprintf(buf, sizeof(buf), "%u", v);
-  o.append(buf, n > 0 ? static_cast<std::size_t>(n) : 1);
+  if (v == 0) { o += '0'; return; }
+  char buf[11]; // 4294967295 is 10 chars + nul
+  int pos = 10;
+  while (v > 0) { buf[pos--] = '0' + static_cast<char>(v % 10); v /= 10; }
+  o.append(buf + pos + 1, static_cast<std::size_t>(10 - pos));
 }
 
 template <std::size_t N>
@@ -194,30 +202,6 @@ ScenePacket buildScenePacket(const CRay* ray)
     s.primitives.emplace_back(pk);
   }
 
-  // Collect unique character bitmaps (cPrimCharacter / type 5).
-  {
-    std::set<int> seen;
-    for (const auto& pk : s.primitives)
-      if (pk.type == 5 && pk.char_id > 0) seen.insert(pk.char_id);
-
-    auto* charObj = ray->G->Character;
-    if (charObj) {
-      for (int cid : seen) {
-        if (cid > charObj->MaxAlloc) continue;
-        const auto& cr = charObj->Char[cid];
-        if (!cr.Pixmap.buffer || cr.Pixmap.width <= 0 || cr.Pixmap.height <= 0)
-          continue;
-        CharBitmapPacket bp;
-        bp.char_id = cid;
-        bp.width = cr.Pixmap.width;
-        bp.height = cr.Pixmap.height;
-        std::size_t nbytes = static_cast<std::size_t>(bp.width) * bp.height * 4;
-        bp.rgba_data.assign(cr.Pixmap.buffer, cr.Pixmap.buffer + nbytes);
-        s.char_bitmaps.emplace_back(std::move(bp));
-      }
-    }
-  }
-
   // Copy label runs.
   for (const auto& run : ray->label_runs) {
     LabelRunPacket lrp;
@@ -235,22 +219,19 @@ ScenePacket buildScenePacket(const CRay* ray)
     s.label_runs.emplace_back(std::move(lrp));
   }
 
-  // Also collect char bitmaps referenced by label runs (in case character()
-  // was never called for these IDs and they weren't collected above).
+  // Collect unique character bitmaps from both primitives and label runs
+  // in a single pass.
   {
-    std::set<int> seen;
-    for (const auto& cb : s.char_bitmaps) seen.insert(cb.char_id);
+    std::set<int> char_ids;
+    for (const auto& pk : s.primitives)
+      if (pk.type == 5 && pk.char_id > 0) char_ids.insert(pk.char_id);
     for (const auto& lr : s.label_runs)
       for (int cid : lr.char_ids)
-        if (cid > 0) seen.insert(cid);
+        if (cid > 0) char_ids.insert(cid);
 
     auto* charObj = ray->G->Character;
     if (charObj) {
-      // Re-scan: add any char_ids from label_runs not already in char_bitmaps
-      std::set<int> existing;
-      for (const auto& cb : s.char_bitmaps) existing.insert(cb.char_id);
-      for (int cid : seen) {
-        if (existing.count(cid)) continue;
+      for (int cid : char_ids) {
         if (cid > charObj->MaxAlloc) continue;
         const auto& cr = charObj->Char[cid];
         if (!cr.Pixmap.buffer || cr.Pixmap.width <= 0 || cr.Pixmap.height <= 0)

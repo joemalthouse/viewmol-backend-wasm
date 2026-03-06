@@ -68,9 +68,12 @@ export async function renderRayScene(
         );
     }
 
-    // Create API instance and renderer
+    // Create API instance
     const api = new ViewMolAPI();
-    const renderFn = createRenderFn(() => api);
+
+    if (typeof api.renderSceneJSON !== 'function') {
+        throw new Error('ViewMolAPI instance does not have renderSceneJSON method');
+    }
 
     const mergedSettings: Record<string, unknown> = {
         rayShadows: 1,
@@ -90,11 +93,10 @@ export async function renderRayScene(
     const mergedOptions: Record<string, unknown> = {
         executionProfile: 'parity',
         returnRGBA: true,
-        ...( renderOptions || {})
+        ...(renderOptions || {})
     };
 
-    const rgba = await renderFn(sceneJSON, mergedSettings, width, height, mergedOptions);
-    return rgba;
+    return api.renderSceneJSON(sceneJSON, mergedSettings, width, height, mergedOptions);
 }
 
 /**
@@ -113,26 +115,3 @@ function getViewMolAPI(): (new () => any) | null {
     return null;
 }
 
-/**
- * Creates a render function using viewmol-ray-tracer's createRenderSceneJSON pattern.
- * The viewmol-ray-tracer ESM module exports createRenderSceneJSON which takes
- * a factory function returning a ViewMolAPI instance.
- */
-function createRenderFn(getAPI: () => any) {
-    let _api: any = null;
-    return async function(
-        sceneJsonStr: string,
-        settings: Record<string, unknown>,
-        width: number,
-        height: number,
-        renderOptions: Record<string, unknown>
-    ): Promise<Uint8Array | null> {
-        if (!_api) _api = getAPI();
-        const api = _api;
-        // Use the API's built-in renderSceneJSON if available (from createRenderSceneJSON)
-        if (typeof api.renderSceneJSON === 'function') {
-            return api.renderSceneJSON(sceneJsonStr, settings, width, height, renderOptions);
-        }
-        throw new Error('ViewMolAPI instance does not have renderSceneJSON method');
-    };
-}

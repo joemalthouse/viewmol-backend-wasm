@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["pymol.ts", "test-api.ts"]
+  "include": ["pymol.ts", "render.ts", "test-api.ts", "test-new-api.ts", "test_label_debug.ts", "tests/*.ts"]
 }
