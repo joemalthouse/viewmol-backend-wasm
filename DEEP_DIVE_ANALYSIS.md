@@ -420,22 +420,31 @@ while ((c = *(st++))) {          // For each character in the string
 
 #### Step 4: Serialization in RayBackend.cpp
 `buildScenePacket()` (layer1/RayBackend.cpp:91-225):
-- Copies each primitive into a `PrimitivePacket` (46 floats per packet)
+- Copies each primitive into a `PrimitivePacket` (10 scalars + 12 vec3s = 46 values = 184 bytes)
 - For `cPrimCharacter`: copies `char_id`, `v1`, `v2`, `v3`, `n0`-`n3`, `c1`-`c3`, `ic`
 - Collects unique character bitmaps from the `Character` cache
 
 `serializeScenePacketJSON()` (RayBackend.cpp:231-307):
-- Each primitive = 46 floats in the flat JSON array
-- Each float averages ~8 chars in JSON (e.g., `0.123456,`)
+- Each primitive = 46 floats in the flat JSON array using `%.9g` format
+- Each float averages ~8-12 chars in JSON
 
-**Per glyph JSON cost: 2 primitives x 46 floats x ~8 chars = ~736 bytes of JSON**
+**Per glyph JSON cost: 2 primitives x ~350-480 bytes = ~700-960 bytes of JSON**
 
 #### Step 5: Character Bitmaps
 Each unique glyph bitmap is serialized as:
 ```json
-{"char_id":42,"w":8,"h":12,"rgba":[0,0,0,0, ... 384 values ...]}
+{"char_id":42,"w":8,"h":13,"rgba":[0,0,0,0, ... 416 values ...]}
 ```
-A typical 8x12 glyph = 384 RGBA bytes = ~1,200 chars of JSON. But bitmaps are deduplicated (only unique `char_id`s), so a 10-character label "RESIDUE CA" with 7 unique characters sends 7 bitmaps.
+A typical 8x13 GLUT font glyph = 416 RGBA bytes = ~1,200-1,600 chars of JSON. Bitmaps are deduplicated (only unique `char_id`s), so a 10-character label "RESIDUE CA" with 7 unique characters sends 7 bitmaps.
+
+#### What's Redundant Across Glyphs in One Label
+
+For all glyphs in a single label, the following are **identical or derivable**:
+- **n0, n1, n2, n3**: All four normals = same screen-facing z-normal. 24 floats repeated per glyph.
+- **ic** (interior color): Same for the entire label. 6 floats repeated.
+- **trans, wobble, flags**: Same for entire label.
+- **c1, c2, c3**: Encode glyph pixel dimensions — derivable from `char_id`'s bitmap.
+- **v1, v2, v3**: Each glyph's quad is computable client-side from: label origin + glyph index + advance + screen-aligned axes + glyph dimensions.
 
 ### Current CRay Struct (Ray.h:107-182)
 
@@ -444,30 +453,71 @@ The `_CRay` struct has **NO `label_runs` field.** The relevant fields are:
 - `int NPrimitive` — count
 - No grouping, no metadata about text runs
 
+### Byte Count Comparison
+
+For "ALA 123" (7 characters):
+
+| Approach | JSON bytes |
+|---|---|
+| Current: 14 `cPrimCharacter` primitives | ~5,600-6,700 |
+| label_runs: 1 batched object | ~250-350 |
+| **Savings** | **~94-95%** |
+
 ### What label_runs Would Look Like
 
-A hypothetical `label_runs` design:
+A hypothetical `label_runs` JSON design:
+```json
+{
+  "label_runs": [
+    {
+      "text": "ALA 123",
+      "origin": [x, y, z],
+      "normal": [nx, ny, nz],
+      "x_axis": [xx, xy, xz],
+      "y_axis": [yx, yy, yz],
+      "scale": 0.0123,
+      "color": [r, g, b],
+      "trans": 0.0,
+      "char_ids": [12, 45, 12, 67, 89, 90, 91],
+      "font_id": 5
+    }
+  ],
+  "char_metrics": {
+    "12": {"w": 8, "h": 13, "xorig": 0, "yorig": 11, "advance": 8}
+  }
+}
+```
+
+The GPU renderer would compute quad vertices from origin + per-glyph advance along `x_axis`, looking up `char_metrics` for dimensions. This eliminates transmitting all v1/v2/v3 vertices and repeated normals.
+
+**C++ struct equivalent:**
 ```cpp
 struct LabelRun {
     std::string text;          // "ALA 42"
     float position[3];         // 3D anchor point
+    float normal[3];           // screen-facing z-normal
+    float x_axis[3];           // screen-right in world space
+    float y_axis[3];           // screen-up in world space
+    float scale;               // world-units-per-pixel at this depth
     float color[3];            // text color
-    float font_size;           // scale factor
+    float trans;               // transparency
+    std::vector<int> char_ids; // per-glyph bitmap IDs
     int font_id;               // GLUT font ID
 };
 std::vector<LabelRun> label_runs;  // Added to CRay
 ```
 
 **Benefits of batching:**
-- A 6-char label → 1 LabelRun (~50 bytes) instead of 12 primitives (12 x 46 = 552 floats)
-- ~10x reduction in JSON size for label-heavy scenes
-- GPU renderer can use native text rendering instead of per-glyph texture quads
+- A 7-char label → 1 LabelRun (~300 bytes) instead of 14 primitives (~6,000 bytes JSON)
+- **94-95% reduction** in JSON size for label-heavy scenes
+- GPU renderer can use native text layout instead of per-glyph texture quads
 
 **Costs:**
 - Must modify `CRay::character()` to accumulate into runs instead of individual primitives
 - Must track text cursor state across character calls (position, color, font)
 - GPU renderer must implement text layout (currently handled by the glyph quad approach)
 - `FontGLUT::RenderRay()` calls `ray->character()` per glyph with no context about grouping — runs would need bracketing (`beginTextRun()` / `endTextRun()`)
+- Must add per-glyph metrics (`xorig`, `yorig`, `advance`) to the serialized scene
 
 ### Implementation Difficulty
 
