@@ -74,54 +74,105 @@ The WASM API is defined in `pymol-open-source/layer5/PyMOLWasm.cpp` (1162 lines)
 
 ### What Native PyMOL Exposes (that WASM doesn't)
 
-Native PyMOL's Python `cmd` module (`modules/pymol/`) exposes ~200+ commands via `Cmd.cpp` (layer4) which calls `Executive*` functions (layer3). The key missing categories and their C++ backing:
+Native PyMOL's Python `cmd` module (`modules/pymol/`) exposes ~200+ commands via `Cmd.cpp` (layer4) which calls `Executive*` functions (layer3). The full missing API is organized by category below.
+
+#### File Export / Serialization (HIGH PRIORITY)
+| Missing Command | C++ Function | Difficulty |
+|---|---|---|
+| `get_str` / `get_pdbstr` / `get_sdfstr` / `get_cifstr` / `get_mol2str` | `MoleculeExporterGetStr()` — **exists and compiles** | Easy (see Issue 3) |
+| `save` (molecular formats) | Same `MoleculeExporterGetStr()` | Easy |
+| `get_ccp4str` | `ExecutiveGetCCP4Str()` — separate code path | Medium |
+| `get_session` / PSE export | `ExecutiveGetSession()` — **requires Python pickling** | Not implementable |
+
+#### Structural Alignment / Fitting (HIGH PRIORITY)
+| Missing Command | C++ Function | Difficulty |
+|---|---|---|
+| `align` (full version) | `ExecutiveAlign()` — **20+ params. Current `PyMOLWasm_Align` only does simplified `ExecutiveRMSPairs`** | Medium |
+| `super` | `ExecutiveAlign()` with `seq_wt=0` | Medium: same function, different defaults |
+| `fit` | `ExecutiveFit()` — **exists** | Easy |
+| `rms` / `rms_cur` | `ExecutiveRMS()` — **exists** | Easy |
+| `pair_fit` | `ExecutiveRMSPairs()` — **already partially used by Align** | Easy |
+| `cealign` | `ExecutiveCEAlign()` — **takes `PyObject*` lists** | Hard: Python-dependent |
 
 #### Structure Manipulation
 | Missing Command | C++ Function | Difficulty |
 |---|---|---|
-| `alter` / `iterate` | `ExecutiveIterate()` — **exists but gutted by `#ifdef _WEBGL`** | Medium (see Issue 2) |
-| `alter_state` / `iterate_state` | `ExecutiveIterateState()` — **also gutted** | Medium |
-| `h_add` | `ExecutiveAddHydrogens()` — **exists in header** | Easy: 5-line wrapper |
-| `sculpt_activate` | `ExecutiveSculptActivate()` — **exists** | Easy |
-| `sculpt_iterate` | `ExecutiveSculptIterate()` — **exists** | Easy |
-| `protect` / `deprotect` | `ExecutiveProtect()` — **exists** | Easy |
+| `alter` / `iterate` | `ExecutiveIterate()` — **exists but gutted by `#ifdef _WEBGL`** | Hard (see Issue 2) |
+| `alter_state` / `iterate_state` | `ExecutiveIterateState()` — **also gutted** | Hard |
+| `h_add` / `h_fill` | `ExecutiveAddHydrogens()` — **exists** | Easy: 5-line wrapper |
+| `sculpt_activate` / `sculpt_iterate` | `ExecutiveSculptActivate()` / `ExecutiveSculptIterate()` — **exist** | Easy |
+| `protect` / `deprotect` / `mask` | `ExecutiveProtect()` / `ExecutiveMask()` — **exist** | Easy |
 | `flag` | `ExecutiveFlag()` — **exists** | Easy |
-| `rebuild` | `ExecutiveRebuildAll()` — **exists, void function** | Trivial |
+| `set_dihedral` | `ExecutiveSetDihe()` — **exists** (setter for existing `GetDihedral`) | Easy |
+| `pseudoatom` | `ExecutivePseudoatom()` — **exists, many params** | Easy |
+| `sort` / `rename` | `ExecutiveSort()` / `ExecutiveRenameObjectAtoms()` — **exist** | Easy |
+| `set_geometry` | `ExecutiveSetGeometry()` — **exists** | Easy |
+| `smooth` | `ExecutiveSmooth()` — **exists** | Easy |
+| `rebond` | `ExecutiveRebond()` — **exists** | Easy |
 
-#### File Export
+#### Viewing / Display
 | Missing Command | C++ Function | Difficulty |
 |---|---|---|
-| `get_pdbstr` / `get_str` | `MoleculeExporterGetStr()` — **exists and compiles** | Easy (see Issue 3) |
-| `save` | `MoleculeExporterGetStr()` + VFS write | Easy |
+| `enable` / `disable` | `ExecutiveSetObjVisib()` — **trivially missing, single-line wrappers** | Trivial |
+| `orient` | `ExecutiveOrient()` — **exists** | Easy |
+| `clip` | `ExecutiveClip()` — **exists** | Easy |
+| `move` | `ExecutiveMove()` — **exists** | Easy |
+| `reset` | `ExecutiveReset()` — **exists** | Easy |
+| `bg_color` | `ExecutiveBackgroundColor()` — **exists** | Easy |
+| `cartoon` | `ExecutiveCartoon()` — **exists** | Easy |
+| `rebuild` | `ExecutiveRebuildAll()` / `ExecutiveInvalidateRep()` — **exist** | Trivial |
+| `toggle` | `ExecutiveToggleRepVisib()` — **exists** | Easy |
+| `stereo` | `ExecutiveStereo()` — **exists** | Easy |
+| `refresh` | `ExecutiveDrawNow()` / `SceneChanged()` | Easy |
+| `volume` | `ExecutiveVolume()` — **exists** | Easy |
+| `isolevel` | `ExecutiveIsolevel()` — **exists** | Easy |
 
-#### Alignment & Fitting
+#### Object Management / Querying
 | Missing Command | C++ Function | Difficulty |
 |---|---|---|
-| `super` | `ExecutiveAlign()` (same as align, different params) | Easy: same function, `transform=1` |
-| `fit` / `rms` / `rms_cur` | `ExecutiveRMS()` — **exists** | Easy |
-| `pair_fit` | `ExecutiveRMSPairs()` — **already partially used by Align** | Easy |
-| `cealign` | Requires `layer4/CEAlign.cpp` | Medium: separate algorithm |
-
-#### Symmetry
-| Missing Command | C++ Function | Difficulty |
-|---|---|---|
-| `get_symmetry` | `ExecutiveGetSymmetry()` — **exists, returns floats** | Easy |
-| `set_symmetry` | `ExecutiveSetSymmetry()` — **exists** | Easy |
+| `get_names` / `get_object_list` | `ExecutiveGetNames()` — **returns `vector<const char*>`** | Easy |
+| `get_type` | `ExecutiveGetType()` — **returns `const char*`** | Trivial |
+| `set_name` | `ExecutiveSetName()` — **exists** | Easy |
+| `count_states` | `ExecutiveCountStates()` — **returns int** | Trivial |
+| `get_chains` | `ExecutiveGetChains()` — **returns `vector<const char*>`** | Easy |
+| `get_symmetry` / `set_symmetry` | `ExecutiveGetSymmetry()` / `ExecutiveSetSymmetry()` — **exist** | Easy |
+| `get_title` / `set_title` | `ExecutiveGetTitle()` / `ExecutiveSetTitle()` — **exist** | Easy |
+| `get_object_matrix` | `ExecutiveGetObjectMatrix()` — **returns `double[16]`** | Easy |
+| `get_position` | `SceneGetCenter()` — **exists** | Easy |
+| `reinitialize` | `ExecutiveReinitialize()` — **exists** | Easy |
+| `order` / `group` | `ExecutiveOrder()` / `ExecutiveGroup()` — **exist** | Easy |
 
 #### Rendering
 | Missing Command | C++ Function | Difficulty |
 |---|---|---|
 | `set_color` | `ColorGetIndex()` + `ColorDef()` in `layer1/Color.cpp` | Easy |
 | `set_object_color` | `ExecutiveSetObjectColor()` — **exists** | Easy |
-| `volume` | `ExecutiveVolume()` — **exists** | Medium: needs volume color ramp |
+
+#### Settings
+| Missing Command | C++ Function | Difficulty |
+|---|---|---|
+| `get_setting` | `SettingGetGlobal_f/i/s` — **pure C++ macros** | Trivial |
+| `unset` | `ExecutiveUnsetSetting()` — **exists** | Easy |
+| `set_bond` / `unset_bond` | `ExecutiveSetBondSettingFromString()` / `ExecutiveUnsetBondSetting()` | Easy |
+
+#### Movie / Animation
+| Missing Command | C++ Function | Difficulty |
+|---|---|---|
+| `mset` / `mdo` / `mview` | `MovieSetCommand()` / `ExecutiveMotionView()` | Medium |
+| `mcopy` / `mmove` | Internal movie functions | Medium |
 
 ### Implementation Assessment
 
-**Trivial (< 10 lines each, just wire up existing Executive* calls):** `rebuild`, `h_add`, `protect`/`deprotect`, `flag`, `sculpt_activate`, `sculpt_iterate`, `set_color`, `set_object_color`, `get_symmetry`, `set_symmetry`
+**Tier 1 — Quick wins (~30 functions, <30 lines each, just wiring to existing Executive* calls):**
+`get_str`/`save`, `enable`/`disable`, `orient`, `get_names`, `get_type`, `count_states`, `get_setting`, `h_add`, `set_dihedral`, `pseudoatom`, `reinitialize`, `set_name`, `bg_color`, `clip`, `move`, `reset`, `protect`/`deprotect`/`mask`, `sort`, `cartoon`, `unset`, `get_chains`, `get_symmetry`/`set_symmetry`, `get_title`/`set_title`, `get_object_matrix`, `order`/`group`, `isolevel`, `volume`, `rebuild`, `toggle`, `flag`, `sculpt_activate`/`sculpt_iterate`
 
-**Easy (10-30 lines, pattern matches existing WASM functions):** `get_str`/`save` (file export), `super`, `fit`/`rms`, `pair_fit`, `count_states`, `orient`
+**Tier 2 — Moderate effort (need parameter mapping, compound operations, or return value serialization):**
+`align` (full 20+ param version), `super`, `fit`, `rms`/`rms_cur`, `get_bonds`, `split_states`, `mset`/`mdo`/`mview`, object-level `rotate`/`translate`
 
-**Medium (new logic or data marshaling):** `alter`/`iterate` (needs non-Python evaluator), `cealign`, `volume`/`volume_color`
+**Tier 3 — Hard (blocked by Python dependency or architectural issues):**
+`alter`/`iterate`/`alter_state`/`iterate_state` (blocked by `#ifdef _WEBGL`), `get_model` (returns `PyObject*`), `get_session`/`set_session` (Python pickling), `cealign` (`PyObject*` lists), `png`/`mpng` (framebuffer readback)
+
+**Key observation:** The current `PyMOLWasm_Align` is a **simplified version** using only `ExecutiveRMSPairs`, not the full `ExecutiveAlign` with sequence alignment, iterative refinement, and alignment object creation.
 
 ---
 
@@ -829,17 +880,19 @@ Total: ~285 lines to add comprehensive introspection.
 
 | Issue | Effort | Files to Modify |
 |---|---|---|
-| 1. Missing API (trivial functions) | ~150 lines | `PyMOLWasm.cpp`, `CMakeLists.txt` |
-| 2. alter/iterate | ~200-300 lines | `PyMOLWasm.cpp`, `CMakeLists.txt` (new evaluator or property enum) |
+| 1. Missing API (~30 Tier 1 functions) | ~300-450 lines | `PyMOLWasm.cpp`, `CMakeLists.txt` |
+| 2. alter/iterate | ~200-300 lines | `PyMOLWasm.cpp`, `CMakeLists.txt` (new property enum API) |
 | 3. File export | ~15 lines | `PyMOLWasm.cpp`, `CMakeLists.txt` |
 | 4. FMA precision | 0 lines (accept) | None (platform inherent) |
 | 5. label_runs batching | ~200+ lines | `Ray.h`, `Ray.cpp`, `FontGLUT.cpp`, `RayBackend.cpp`, `RayBackend.h` |
-| 6. Introspection | ~235 lines | `PyMOLWasm.cpp`, `CMakeLists.txt` |
+| 6. Introspection | ~285 lines | `PyMOLWasm.cpp`, `CMakeLists.txt` |
 
-**Quickest wins:** File export (Issue 3, 15 lines) and trivial API additions (Issue 1, ~10 lines each).
+**Quickest wins:** File export (Issue 3, 15 lines) and trivial API additions (Issue 1, ~10 lines each). `enable`/`disable` are the most trivially missing — single-line wrappers around `ExecutiveSetObjVisib`.
 
 **Highest impact:** Introspection (Issue 6) and alter/iterate (Issue 2).
 
-**Not fixable in WASM:** FMA precision (Issue 4) — inherent to platform.
+**Not fixable in WASM:** FMA precision (Issue 4) — inherent to platform. Session save (part of Issue 3) — requires Python pickling.
 
 **Most complex:** label_runs batching (Issue 5) — touches the rendering pipeline across 5 files.
+
+**Architecturally blocked:** `alter`/`iterate`, `get_model`, `cealign`, `get_session` — all require Python (`PyObject*`, `PyEval_EvalCode`, `cPickle`). Need alternative non-Python APIs.
