@@ -244,7 +244,9 @@ This follows the exact pattern of `GetAtomCoordinates` but reads from `AtomInfoT
 
 ### How Native PyMOL Exports Files
 
-**Key function:** `MoleculeExporterGetStr()` in `layer3/MoleculeExporter.cpp`
+**Call chain:** `cmd.get_str(format, selection)` → `Cmd.cpp` `CmdGetStr()` (line 3891) → `MoleculeExporterGetStr()`
+
+**Key function:** `MoleculeExporterGetStr()` in `layer3/MoleculeExporter.cpp` (line 1948)
 
 ```cpp
 pymol::vla<char> MoleculeExporterGetStr(PyMOLGlobals* G,
@@ -257,19 +259,28 @@ pymol::vla<char> MoleculeExporterGetStr(PyMOLGlobals* G,
     bool quiet);
 ```
 
-**This function exists, compiles, and works in the WASM build.** It has no `_WEBGL` guards. It returns a `pymol::vla<char>` (variable-length array of characters) — essentially a C string.
+**This function exists, compiles, and works in the WASM build.** It has no `_WEBGL` guards. It returns a `pymol::vla<char>` (variable-length array of characters) — essentially a C string. The export logic is **entirely decoupled from file I/O** — it produces an in-memory buffer, and the Python `cmd.save()` is what writes that buffer to disk.
 
 **Supported export formats** (from MoleculeExporter.cpp classes):
-| Format String | Exporter Class | Description |
-|---|---|---|
-| `"pdb"` | `MoleculeExporterPDB` | PDB format |
-| `"pqr"` | `MoleculeExporterPQR` | PQR format (charges/radii) |
-| `"cif"` | `MoleculeExporterCIF` | mmCIF format |
-| `"pmcif"` | `MoleculeExporterPMCIF` | PyMOL-extended CIF |
-| `"mol"` / `"mol2"` | `MoleculeExporterMOL` / `MoleculeExporterMOL2` | MDL MOL / Sybyl MOL2 |
-| `"sdf"` | `MoleculeExporterSDF` | Structure-Data Format |
-| `"mae"` | `MoleculeExporterMAE` | Maestro format |
-| `"xyz"` | `MoleculeExporterXYZ` | XYZ coordinate format |
+| Format String | Exporter Class | Line | Description |
+|---|---|---|---|
+| `"pdb"` | `MoleculeExporterPDB` | 440 | Standard PDB format |
+| `"pqr"` | `MoleculeExporterPQR` | 601 | PDB with charge/radius |
+| `"cif"` | `MoleculeExporterCIF` | 623 | mmCIF format |
+| `"pmcif"` | `MoleculeExporterPMCIF` | 768 | PyMOL-extended CIF |
+| `"mol"` | `MoleculeExporterMOL` | 815 | MDL MOL (V2000) |
+| `"sdf"` | `MoleculeExporterSDF` | 944 | Structure-Data Format |
+| `"mol2"` | `MoleculeExporterMOL2` | 1004 | Sybyl MOL2 |
+| `"mae"` | `MoleculeExporterMAE` | 1115 | Maestro format |
+| `"xyz"` | `MoleculeExporterXYZ` | 1465 | XYZ coordinate format |
+
+**Note on binary formats:** MMTF (`MoleculeExporterMMTF`, line 1511) and BinaryCIF (`MoleculeExporterBCIF`, line 1639) exist but are gated behind `_PYMOL_NO_MSGPACKC`, which IS defined in this build. They cannot be used without adding the msgpackc dependency.
+
+### No VFS Involved
+
+Despite what one might assume, **no Emscripten VFS is used** in either direction:
+- **Load:** `PyMOLWasm_Load` passes content directly as `const char* content` with `content_length`. `ExecutiveLoad()` receives it as an in-memory buffer (empty string `""` as the filename argument means "use the content buffer").
+- **Export:** `MoleculeExporterGetStr()` returns data directly as a `pymol::vla<char>` in memory — no file is ever written.
 
 ### How GetRayScene Works (the precedent pattern)
 
@@ -314,7 +325,8 @@ int PyMOLWasm_GetStr(CPyMOL* pymolPtr, const char* format,
 **Difficulty: Trivial.** ~15 lines. The export engine is fully functional — it just needs a WASM wrapper. The Emscripten VFS is not needed; `MoleculeExporterGetStr` returns data directly in memory.
 
 ### What's NOT Exportable
-- **Session files (.pse):** `ExecutiveGetSession()` requires `PyObject*` dict — Python-dependent, **not implementable** without significant rework.
+- **Session files (.pse/.psw):** There is **no `ExecutiveSaveSession` in this codebase.** The only `ExecutiveSave*` function is `ExecutiveSaveUndo()` (Executive.cpp:8079), which is unrelated. Session save is entirely Python-side: `cmd.get_session()` returns a Python dict, which is then pickled via `cPickle.dumps`. **Not implementable** in the WASM build without either re-implementing session serialization in C++ or embedding a Python runtime.
+- **Binary formats (MMTF, BinaryCIF):** Require the msgpackc library, which is excluded by the `_PYMOL_NO_MSGPACKC` define.
 - **Image export (.png):** Handled externally by WebGPU renderer, not relevant to the molecular data API.
 
 ---
