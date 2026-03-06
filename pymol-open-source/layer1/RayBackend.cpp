@@ -241,20 +241,36 @@ ScenePacket buildScenePacket(const CRay* ray)
     s.primitives.emplace_back(pk);
   }
 
-  // Copy label runs.
+  // Copy label runs in v1 format (runs + glyphs arrays).
   for (const auto& run : ray->label_runs) {
     LabelRunPacket lrp;
     for (int i = 0; i < 3; ++i) {
-      lrp.origin[i] = run.origin[i];
-      lrp.normal[i] = run.normal[i];
-      lrp.x_axis[i] = run.x_axis[i];
-      lrp.y_axis[i] = run.y_axis[i];
+      lrp.anchor[i] = run.origin[i];
       lrp.color[i]  = run.color[i];
+      lrp.screen_offset[i] = run.screen_offset[i];
+      lrp.indent_px[i] = run.indent_px[i];
     }
-    lrp.v_scale = run.v_scale;
-    lrp.trans = run.trans;
+    lrp.color[3] = 1.0f - run.trans;  // alpha
+    lrp.scale = run.v_scale;
     lrp.font_id = run.font_id;
-    lrp.char_ids = run.char_ids;
+    lrp.font_size = run.font_size;
+    lrp.relative_mode = run.relative_mode;
+    lrp.prim_start = run.prim_start;
+    lrp.prim_count = run.prim_count;
+    lrp.text = run.text;
+    lrp.glyph_start = static_cast<int>(s.glyphs.size());
+    lrp.glyph_count = static_cast<int>(run.glyphs.size());
+
+    for (const auto& g : run.glyphs) {
+      GlyphPacket gp;
+      gp.char_id = g.char_id;
+      gp.offset_px = {g.offset_px[0], g.offset_px[1]};
+      gp.size_px = {g.size_px[0], g.size_px[1]};
+      gp.advance_px = g.advance_px;
+      gp.xorig = g.xorig;
+      gp.yorig = g.yorig;
+      s.glyphs.emplace_back(gp);
+    }
     s.label_runs.emplace_back(std::move(lrp));
   }
 
@@ -264,9 +280,8 @@ ScenePacket buildScenePacket(const CRay* ray)
     std::unordered_set<int> char_ids;
     for (const auto& pk : s.primitives)
       if (pk.type == 5 && pk.char_id > 0) char_ids.insert(pk.char_id);
-    for (const auto& lr : s.label_runs)
-      for (int cid : lr.char_ids)
-        if (cid > 0) char_ids.insert(cid);
+    for (const auto& gp : s.glyphs)
+      if (gp.char_id > 0) char_ids.insert(gp.char_id);
 
     auto* charObj = ray->G->Character;
     if (charObj) {
@@ -363,27 +378,46 @@ std::string serializeScenePacketJSON(const ScenePacket& scene)
   }
   o += ']';
 
-  // Label runs (batched text labels).
-  o += ",\"label_runs\":[";
+  // Label runs v1 format: {runs, glyphs} for GPU ray tracer.
+  o += ",\"label_runs_version\":1";
+  o += ",\"label_runs\":{\"runs\":[";
   for (std::size_t li = 0; li < scene.label_runs.size(); ++li) {
     if (li) o += ',';
     const auto& lr = scene.label_runs[li];
-    o += "{\"origin\":";  jFloatArray(o, lr.origin);
-    o += ",\"normal\":";  jFloatArray(o, lr.normal);
-    o += ",\"x_axis\":";  jFloatArray(o, lr.x_axis);
-    o += ",\"y_axis\":";  jFloatArray(o, lr.y_axis);
-    o += ",\"v_scale\":";  jFloat(o, lr.v_scale);
-    o += ",\"color\":";   jFloatArray(o, lr.color);
-    o += ",\"trans\":";   jFloat(o, lr.trans);
-    o += ",\"font_id\":"; jInt(o, lr.font_id);
-    o += ",\"char_ids\":[";
-    for (std::size_t ci = 0; ci < lr.char_ids.size(); ++ci) {
-      if (ci) o += ',';
-      jInt(o, lr.char_ids[ci]);
+    o += "{\"anchor\":";        jFloatArray(o, lr.anchor);
+    o += ",\"color\":";         jFloatArray(o, lr.color);
+    o += ",\"screen_offset\":"; jFloatArray(o, lr.screen_offset);
+    o += ",\"indent_px\":";     jFloatArray(o, lr.indent_px);
+    o += ",\"scale\":";         jFloat(o, lr.scale);
+    o += ",\"font_id\":";       jInt(o, lr.font_id);
+    o += ",\"font_size\":";     jFloat(o, lr.font_size);
+    o += ",\"relative_mode\":"; jInt(o, lr.relative_mode);
+    o += ",\"prim_start\":";    jInt(o, lr.prim_start);
+    o += ",\"prim_count\":";    jInt(o, lr.prim_count);
+    o += ",\"glyph_start\":";   jInt(o, lr.glyph_start);
+    o += ",\"glyph_count\":";   jInt(o, lr.glyph_count);
+    // JSON-escape text (only printable ASCII expected)
+    o += ",\"text\":\"";
+    for (char c : lr.text) {
+      if (c == '"') o += "\\\"";
+      else if (c == '\\') o += "\\\\";
+      else o += c;
     }
-    o += "]}";
+    o += "\"}";
   }
-  o += ']';
+  o += "],\"glyphs\":[";
+  for (std::size_t gi = 0; gi < scene.glyphs.size(); ++gi) {
+    if (gi) o += ',';
+    const auto& g = scene.glyphs[gi];
+    o += "{\"char_id\":";    jInt(o, g.char_id);
+    o += ",\"offset_px\":";  jFloatArray(o, g.offset_px);
+    o += ",\"size_px\":";    jFloatArray(o, g.size_px);
+    o += ",\"advance_px\":"; jFloat(o, g.advance_px);
+    o += ",\"xorig\":";      jFloat(o, g.xorig);
+    o += ",\"yorig\":";      jFloat(o, g.yorig);
+    o += '}';
+  }
+  o += "]}";
 
   // Wobble texture data.
   o += ",\"wobble\":";        jInt(o, scene.wobble);

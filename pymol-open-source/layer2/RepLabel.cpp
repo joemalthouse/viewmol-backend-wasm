@@ -1275,7 +1275,8 @@ static void RepLabelRenderRay(RepLabel* I, RenderInfo* info)
 
         TextSetPosNColor(G, tCenter, I->labelV[c].color);
 
-        ray->beginLabelRun(font_id);
+        float screenOff[3] = {0.0f, 0.0f, 0.0f};
+        ray->beginLabelRun(font_id, font_size, relativeMode, st, screenOff);
         TextRenderRay(G, ray, font_id, st, font_size, I->labelV[c].position,
             (draw_var ? 1 : 0), I->labelV[c].getRelativeMode());
         ray->endLabelRun();

@@ -6845,7 +6845,9 @@ int CRay::character(int char_id)
   return true;
 }
 
-void CRay::beginLabelRun(int font_id)
+void CRay::beginLabelRun(int font_id, float font_size,
+                         int relative_mode, const char* text,
+                         const float* screen_offset)
 {
   label_runs.emplace_back();
   current_label_run = &label_runs.back();
@@ -6875,34 +6877,56 @@ void CRay::beginLabelRun(int font_id)
   current_label_run->trans = Trans;
   copy3f(IntColor, current_label_run->color);
   current_label_run->font_id = font_id;
+  current_label_run->font_size = font_size;
+  current_label_run->relative_mode = relative_mode;
+  current_label_run->text = text ? text : "";
+  if (screen_offset) {
+    copy3f(screen_offset, current_label_run->screen_offset);
+  } else {
+    zero3f(current_label_run->screen_offset);
+  }
+  zero3f(current_label_run->indent_px);
+  current_label_run->prim_start = static_cast<int>(NPrimitive);
+  current_label_run->prim_count = 0;
+  current_label_run->cursor_x_px = 0.0f;
 }
 
 void CRay::labelRunChar(int char_id)
 {
-  if (current_label_run) {
-    current_label_run->char_ids.push_back(char_id);
+  // Always emit character primitives (type 5) for the non-v1 rendering path.
+  character(char_id);
 
-    // Advance the text cursor (needed for multi-char labels and
-    // for RepLabelRenderRayBackground which reads TextGetPos after rendering)
+  // Additionally record glyph data for the v1 label_runs format.
+  if (current_label_run) {
     int width_i, height_i;
     float xorig, yorig, advance;
     CharacterGetGeometry(G, char_id, &width_i, &height_i, &xorig, &yorig, &advance);
 
-    float vt[3];
-    float scale = current_label_run->v_scale * advance;
-    scale3f(current_label_run->x_axis, scale, vt);
-    float *v = TextGetPos(G);
-    add3f(v, vt, vt);
-    TextSetPos(G, vt);
-  } else {
-    character(char_id);
+    LabelGlyph glyph;
+    glyph.char_id = char_id;
+    glyph.offset_px[0] = current_label_run->cursor_x_px;
+    glyph.offset_px[1] = 0.0f;
+    glyph.size_px[0] = static_cast<float>(width_i);
+    glyph.size_px[1] = static_cast<float>(height_i);
+    glyph.advance_px = advance;
+    glyph.xorig = xorig;
+    glyph.yorig = yorig;
+    current_label_run->glyphs.push_back(glyph);
+
+    current_label_run->cursor_x_px += advance;
+    // Note: cursor already advanced by character() above
   }
 }
 
 void CRay::endLabelRun()
 {
-  if (current_label_run && current_label_run->char_ids.empty()) {
-    label_runs.pop_back();
+  if (current_label_run) {
+    if (current_label_run->glyphs.empty()) {
+      label_runs.pop_back();
+    } else {
+      current_label_run->prim_count =
+          static_cast<int>(NPrimitive) - current_label_run->prim_start;
+    }
   }
   current_label_run = nullptr;
 }

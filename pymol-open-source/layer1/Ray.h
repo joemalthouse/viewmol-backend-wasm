@@ -104,6 +104,15 @@ namespace draw{
 }
 };
 
+struct LabelGlyph {
+  int char_id;
+  float offset_px[2];           // cumulative pixel offset from run origin
+  float size_px[2];             // glyph width, height in pixels
+  float advance_px;             // advance width in pixels
+  float xorig;                  // x origin offset
+  float yorig;                  // y origin offset
+};
+
 struct LabelRun {
   float origin[3];             // 3D anchor point of the label
   float normal[3];             // screen-facing normal (z-axis in world)
@@ -113,7 +122,15 @@ struct LabelRun {
   float color[3];              // text color RGB
   float trans;                 // transparency (0 = opaque)
   int font_id;                 // GLUT font identifier
-  std::vector<int> char_ids;   // per-glyph bitmap IDs
+  float screen_offset[3];     // screen-space offset (relative mode)
+  float indent_px[3];         // pixel indent from anchor
+  float font_size;            // font size setting
+  int relative_mode;           // label relative mode
+  int prim_start;             // first primitive index for this label
+  int prim_count;             // number of primitives for this label
+  std::string text;            // label text string
+  std::vector<LabelGlyph> glyphs;  // per-glyph data
+  float cursor_x_px;          // accumulated x advance in pixels (internal)
 };
 
 struct _CRay {
@@ -145,7 +162,9 @@ struct _CRay {
   void wobble(int mode, const float *par);
   void transparentf(float t);
   int character(int char_id);
-  void beginLabelRun(int font_id);
+  void beginLabelRun(int font_id, float font_size = 14.0f,
+                     int relative_mode = 0, const char* text = "",
+                     const float* screen_offset = nullptr);
   void labelRunChar(int char_id);
   void endLabelRun();
   void interiorColor3fv(const float *v, int passive);

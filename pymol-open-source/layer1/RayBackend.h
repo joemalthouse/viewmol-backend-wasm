@@ -43,16 +43,29 @@ struct CharBitmapPacket {
   std::vector<unsigned char> rgba_data; // RGBA32, row-major, 4*w*h bytes
 };
 
+struct GlyphPacket {
+  int char_id{};
+  std::array<float, 2> offset_px{};
+  std::array<float, 2> size_px{};
+  float advance_px{};
+  float xorig{};
+  float yorig{};
+};
+
 struct LabelRunPacket {
-  std::array<float, 3> origin{};
-  std::array<float, 3> normal{};
-  std::array<float, 3> x_axis{};
-  std::array<float, 3> y_axis{};
-  float v_scale{};
-  std::array<float, 3> color{};
-  float trans{};
+  std::array<float, 3> anchor{};
+  std::array<float, 4> color{};    // RGBA (alpha = 1 - trans)
+  std::array<float, 3> screen_offset{};
+  std::array<float, 3> indent_px{};
+  float scale{};
   int font_id{};
-  std::vector<int> char_ids;
+  float font_size{};
+  int relative_mode{};
+  int prim_start{};
+  int prim_count{};
+  int glyph_start{};               // index into ScenePacket::glyphs
+  int glyph_count{};
+  std::string text;
 };
 
 struct ScenePacket {
@@ -69,6 +82,7 @@ struct ScenePacket {
   std::vector<PrimitivePacket> primitives{};
   std::vector<CharBitmapPacket> char_bitmaps{};
   std::vector<LabelRunPacket> label_runs{};
+  std::vector<GlyphPacket> glyphs{};
   float ray_improve_shadows{0.1f};
   float ray_shadow_fudge{0.001f};
 };
