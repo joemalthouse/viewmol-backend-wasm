@@ -1738,6 +1738,8 @@ int PyMOLWasm_SetAtomPropertyInt(CPyMOL* pymolPtr, const char* selection,
 
     const auto* info = PyMOL_GetAtomPropertyInfo(pymolPtr, property);
     if (!info) return 0;
+    if (info->Ptype != cPType_int && info->Ptype != cPType_schar &&
+        info->Ptype != cPType_uint32) return 0;
 
     int count = 0;
     ObjectMolecule* prev_obj = nullptr;
@@ -1754,8 +1756,7 @@ int PyMOLWasm_SetAtomPropertyInt(CPyMOL* pymolPtr, const char* selection,
             case cPType_uint32:
                 *(unsigned int*)((char*)ai + info->offset) = static_cast<unsigned int>(value);
                 break;
-            default:
-                return 0;
+            default: break;
         }
         apply_property_side_effects(G, ai, property);
         if (iter.obj != prev_obj) {
@@ -1786,26 +1787,21 @@ int PyMOLWasm_SetAtomPropertyString(CPyMOL* pymolPtr, const char* selection,
 
     const auto* info = PyMOL_GetAtomPropertyInfo(pymolPtr, property);
     if (!info) return 0;
+    if (info->Ptype != cPType_int_as_string && info->Ptype != cPType_string) return 0;
 
     int count = 0;
     ObjectMolecule* prev_obj = nullptr;
     SeleAtomIterator iter(G, safe_str(selection));
     while (iter.next()) {
         AtomInfoType* ai = iter.getAtomInfo();
-        switch (info->Ptype) {
-            case cPType_int_as_string: {
-                lexidx_t* field = (lexidx_t*)((char*)ai + info->offset);
-                LexAssign(G, *field, value);
-                break;
-            }
-            case cPType_string: {
-                char* field = (char*)ai + info->offset;
-                strncpy(field, value, info->maxlen);
-                field[info->maxlen - 1] = '\0';
-                break;
-            }
-            default:
-                return 0;
+        if (info->Ptype == cPType_int_as_string) {
+            lexidx_t* field = (lexidx_t*)((char*)ai + info->offset);
+            LexAssign(G, *field, value);
+        } else {
+            char* field = (char*)ai + info->offset;
+            // maxlen = usable string length (excl. null); buffer is maxlen+1
+            strncpy(field, value, info->maxlen + 1);
+            field[info->maxlen] = '\0';
         }
         apply_property_side_effects(G, ai, property);
         if (iter.obj != prev_obj) {
@@ -1865,6 +1861,8 @@ int PyMOLWasm_GetAtomPropertyInt(CPyMOL* pymolPtr, const char* selection,
 
     const auto* info = PyMOL_GetAtomPropertyInfo(pymolPtr, property);
     if (!info) return 0;
+    if (info->Ptype != cPType_int && info->Ptype != cPType_schar &&
+        info->Ptype != cPType_uint32) return 0;
 
     int count = 0;
     SeleAtomIterator iter(G, safe_str(selection));
@@ -1880,8 +1878,7 @@ int PyMOLWasm_GetAtomPropertyInt(CPyMOL* pymolPtr, const char* selection,
             case cPType_uint32:
                 out_buf[count++] = static_cast<int>(*(unsigned int*)((char*)ai + info->offset));
                 break;
-            default:
-                return 0;
+            default: break;
         }
     }
     return count;
@@ -1906,6 +1903,7 @@ int PyMOLWasm_GetAtomPropertyString(CPyMOL* pymolPtr, const char* selection,
 
     const auto* info = PyMOL_GetAtomPropertyInfo(pymolPtr, property);
     if (!info) return 0;
+    if (info->Ptype != cPType_int_as_string && info->Ptype != cPType_string) return 0;
 
     std::string json = "[";
     int count = 0;
@@ -1914,17 +1912,11 @@ int PyMOLWasm_GetAtomPropertyString(CPyMOL* pymolPtr, const char* selection,
         AtomInfoType* ai = iter.getAtomInfo();
         const char* str_val = nullptr;
 
-        switch (info->Ptype) {
-            case cPType_int_as_string: {
-                lexidx_t idx = *(lexidx_t*)((char*)ai + info->offset);
-                str_val = LexStr(G, idx);
-                break;
-            }
-            case cPType_string:
-                str_val = (const char*)ai + info->offset;
-                break;
-            default:
-                return 0;
+        if (info->Ptype == cPType_int_as_string) {
+            lexidx_t idx = *(lexidx_t*)((char*)ai + info->offset);
+            str_val = LexStr(G, idx);
+        } else {
+            str_val = (const char*)ai + info->offset;
         }
 
         if (count > 0) json += ",";
