@@ -1,6 +1,7 @@
 
 #include"Scene.h"
 #include"SceneRay.h"
+#include"RayBackend.h"
 #include"SceneDef.h"
 #include"Util.h"
 #include"ShaderMgr.h"
@@ -485,6 +486,14 @@ bool SceneRay(PyMOLGlobals * G,
           *charVLA_ptr = VLACalloc(char, 100000);
           RayRenderCOLLADA(ray, ray_width, ray_height, charVLA_ptr,
                             I->m_view.m_clipSafe().m_front, I->m_view.m_clipSafe().m_back, fov);
+        }
+        break;
+      case 9:                   /* mode 9 is WebGPU scene JSON */
+        {
+          auto pkt = pymol::ray::buildScenePacket(ray);
+          auto json = pymol::ray::serializeScenePacketJSON(pkt);
+          *charVLA_ptr = VLACalloc(char, json.size() + 1);
+          std::memcpy(*charVLA_ptr, json.data(), json.size());
         }
         break;
 

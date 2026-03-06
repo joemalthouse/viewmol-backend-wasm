@@ -251,15 +251,9 @@ const REP_CASES: WasmParityCase[] = [
             p.setSetting(SETTING.mesh_width, 1.0);
             p.setSetting(SETTING.ray_shadow, 1);
         },
-        // Mesh sausage endpoints are computed by IsosurfInterpolate through a
-        // deep pipeline (grid construction → field computation → marching cubes
-        // → linear interpolation). ARM64 native uses FMA (fused multiply-add,
-        // single rounding) while WASM uses separate mul+add (two roundings),
-        // producing vertex coordinate diffs of ~3e-5. This causes sub-pixel
-        // edge shifts visible as MaxDiff≈157 on 0.11% of pixels. Inherent to
-        // the platform, not a WASM API bug. See: otool shows 4157 FMA
-        // instructions in the native _cmd.cpython shared object.
-        knownPlatformPsnr: 45,
+        // With -ffp-contract=off on native build, FMA divergence is eliminated.
+        // Residual ~62dB gap is from minor math library differences in the
+        // isosurface pipeline (still well above 60dB PASS threshold).
     },
     {
         id: 'wasm_rep_dots',
