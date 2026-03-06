@@ -700,16 +700,25 @@ int ExecutiveGetSettingFromString(PyMOLGlobals* G, PyMOLreturn_value* result,
 ```
 Note: Uses `PyMOLreturn_value` which is a union type — would need adaptation for WASM. Alternatively, use the lower-level `SettingGetGlobal_f/i/s` functions directly.
 
-**Simpler WASM approach:**
+**Simpler WASM approach** using the `SettingGetGlobal_*` macros (layer1/Setting.h:438-442):
 ```cpp
+// These are macros expanding to SettingGet<T>():
+#define SettingGetGlobal_b      SettingGet<bool>
+#define SettingGetGlobal_i      SettingGet<int>
+#define SettingGetGlobal_color  SettingGet<int>
+#define SettingGetGlobal_f      SettingGet<float>
+#define SettingGetGlobal_s      SettingGet<const char *>
+#define SettingGetGlobal_3fv    SettingGet<const float *>
+
+// WASM wrappers:
 float PyMOLWasm_GetSettingFloat(CPyMOL* pymolPtr, int setting_index) {
-    return SettingGetGlobal_f(G, setting_index);
+    return SettingGetGlobal_f(PyMOL_GetGlobals(pymolPtr), setting_index);
 }
 int PyMOLWasm_GetSettingInt(CPyMOL* pymolPtr, int setting_index) {
-    return SettingGetGlobal_i(G, setting_index);
+    return SettingGetGlobal_i(PyMOL_GetGlobals(pymolPtr), setting_index);
 }
 ```
-**Difficulty: Trivial** (~5 lines each).
+**Difficulty: Trivial** (~5 lines each). No Python dependency — these are pure C++ template functions.
 
 #### Symmetry Data
 
@@ -725,20 +734,62 @@ Returns unit cell parameters and space group.
 
 #### Scene Listing
 
-**`get_scene_list`** — No direct C++ function found in Executive.h. Scenes are stored in `MovieScene` objects. Would need to iterate the scene list.
+**`get_scene_list`** → `MovieSceneGetOrder()` (MovieScene.cpp:38-40)
+```cpp
+const std::vector<std::string> & MovieSceneGetOrder(PyMOLGlobals * G) {
+  return G->scenes->order;
+}
+```
+Returns a const reference to the ordered list of scene names. Declared in `MovieScene.h:168`.
 
-Search needed in `MovieScene.cpp`/`MovieScene.h`.
+**WASM wrapper:**
+```cpp
+int PyMOLWasm_GetSceneList(CPyMOL* pymolPtr, char** out_ptr) {
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    const auto& order = MovieSceneGetOrder(G);
+    // Serialize vector<string> to JSON array → malloc'd buffer
+}
+```
+**Difficulty: Easy** (~15 lines). Same serialization pattern as `GetNames`.
 
-**Difficulty: Medium** — needs to find scene enumeration API.
+Also available: `MovieSceneGetMessage(G, name)` for retrieving scene messages, and `MovieSceneGetThumbnail(G, name)` for scene thumbnails.
 
 #### Color Queries
 
-**`get_color_tuple`** → `ColorGet()` in `layer1/Color.cpp`
+**`get_color_tuple`** → `ColorGetIndex()` + `ColorGet()` in `layer1/Color.h:105`
 ```cpp
-void ColorGetRaw(PyMOLGlobals* G, int index, float* rgb);  // or similar
+const float *ColorGet(PyMOLGlobals * G, int index);     // returns float[3] RGB, gamma-corrected
+const float *ColorGetRaw(PyMOLGlobals * G, int index);   // returns float[3] RGB, raw/linear
+int ColorGetIndex(PyMOLGlobals * G, const char *name);   // name → index lookup
 ```
 
-**Difficulty: Easy** (~10 lines).
+**WASM wrapper:**
+```cpp
+int PyMOLWasm_GetColorTuple(CPyMOL* pymolPtr, const char* color_name,
+                              float* out_rgb) {
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    int idx = ColorGetIndex(G, color_name);
+    if (idx < 0) return 0;
+    const float* rgb = ColorGet(G, idx);
+    out_rgb[0] = rgb[0]; out_rgb[1] = rgb[1]; out_rgb[2] = rgb[2];
+    return 1;
+}
+```
+**Difficulty: Trivial** (~10 lines).
+
+#### Bond Queries
+
+**`get_bonds`** → Direct iteration on `ObjectMolecule::Bond` array
+```cpp
+// ObjectMolecule has:
+BondType* Bond;   // array of bonds
+int NBond;        // count
+// Each BondType: int index[2], signed char order
+```
+
+No `ExecutiveGetBonds` function exists, but bonds are directly accessible from `ObjectMolecule` objects. A WASM wrapper would iterate objects matching a selection, then serialize `Bond[i].index[0]`, `Bond[i].index[1]`, `Bond[i].order` for each bond.
+
+**Difficulty: Easy-Medium** (~30-40 lines). Requires `ExecutiveFindObjectMoleculeByName()` to get the object.
 
 #### Model Data (get_model equivalent)
 
@@ -764,11 +815,13 @@ This would iterate atoms via `SeleAtomIterator`, read `AtomInfoType` fields, and
 | 3 | `CountStates` | ~5 | Multi-state queries |
 | 4 | `GetChains` | ~15 | Structure exploration |
 | 5 | `GetSettingFloat` / `GetSettingInt` | ~10 | Setting readback |
-| 6 | `GetSymmetry` | ~15 | Crystallographic data |
-| 7 | `GetColorTuple` | ~10 | Color queries |
-| 8 | `GetModelJSON` | ~150 | Full atom data readback |
+| 6 | `GetSceneList` | ~15 | Scene enumeration |
+| 7 | `GetSymmetry` | ~15 | Crystallographic data |
+| 8 | `GetColorTuple` | ~10 | Color queries |
+| 9 | `GetBonds` | ~35 | Bond connectivity |
+| 10 | `GetModelJSON` | ~150 | Full atom data readback |
 
-Total: ~235 lines to add comprehensive introspection.
+Total: ~285 lines to add comprehensive introspection.
 
 ---
 
