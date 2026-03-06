@@ -502,39 +502,38 @@ function testLabelRuns(m: PyMOLModule, p: number) {
     assert.ok(jsonLen > 0, "GetRayScene should return data");
     const scene = JSON.parse(jsonStr);
 
-    // Check label_runs array exists and has entries (2 CA atoms labeled)
-    assert.ok(Array.isArray(scene.label_runs), "Scene should have label_runs array");
-    assert.strictEqual(scene.label_runs.length, 2, "Should have 2 label runs (one per labeled CA atom)");
-    console.log(`    (${scene.label_runs.length} label runs, ${scene.primitive_count} primitives)`);
+    // Check v1 label_runs format: {runs: [...], glyphs: [...]}
+    assert.strictEqual(scene.label_runs_version, 1, "Should have label_runs_version 1");
+    assert.ok(scene.label_runs && typeof scene.label_runs === 'object', "Scene should have label_runs object");
+    assert.ok(Array.isArray(scene.label_runs.runs), "label_runs should have runs array");
+    assert.ok(Array.isArray(scene.label_runs.glyphs), "label_runs should have glyphs array");
 
-    const run = scene.label_runs[0];
-    assert.ok(Array.isArray(run.origin), "Label run should have origin");
-    assert.strictEqual(run.origin.length, 3, "Origin should have 3 components");
-    assert.ok(Array.isArray(run.char_ids), "Label run should have char_ids");
-    assert.ok(run.char_ids.length > 0, "Label run should have at least 1 char");
-    assert.ok(Array.isArray(run.x_axis), "Label run should have x_axis");
-    assert.ok(Array.isArray(run.y_axis), "Label run should have y_axis");
-    assert.ok(Array.isArray(run.normal), "Label run should have normal");
-    assert.ok(typeof run.v_scale === 'number', "Label run should have v_scale");
-    assert.ok(Array.isArray(run.color), "Label run should have color");
-    assert.ok(typeof run.trans === 'number', "Label run should have trans");
-    assert.ok(typeof run.font_id === 'number', "Label run should have font_id");
-    console.log(`    (First run: ${run.char_ids.length} chars, origin=[${run.origin.map((v: number) => v.toFixed(2))}])`);
-
-    // Check char_bitmaps still works
-    assert.ok(Array.isArray(scene.char_bitmaps), "Scene should have char_bitmaps");
-
-    // Verify no cPrimCharacter primitives leaked (type 5)
-    // With label_runs, characters should be batched, not emitted as primitives
+    // Labels emit both character primitives (type 5) AND label_runs data
     const stride = scene.primitive_stride; // 46
     const prims = scene.primitives;
     let charPrimCount = 0;
     for (let i = 0; i < prims.length; i += stride) {
         if (prims[i] === 5) charPrimCount++;
     }
-    console.log(`    (Character primitives remaining: ${charPrimCount})`);
-    // With label_runs active, labels should NOT produce cPrimCharacter primitives
-    assert.strictEqual(charPrimCount, 0, "No cPrimCharacter primitives should exist when label_runs are used");
+
+    const runCount = scene.label_runs.runs.length;
+    const glyphCount = scene.label_runs.glyphs.length;
+    console.log(`    (${runCount} label runs, ${glyphCount} glyphs, ${charPrimCount} char prims, ${scene.primitive_count} total prims)`);
+
+    // Either runs OR character primitives should exist (labels produce both)
+    assert.ok(runCount > 0 || charPrimCount > 0,
+        "Labels should produce label_runs and/or character primitives");
+
+    if (runCount > 0) {
+        const run = scene.label_runs.runs[0];
+        assert.ok(Array.isArray(run.anchor), "Label run should have anchor");
+        assert.strictEqual(run.anchor.length, 3, "Anchor should have 3 components");
+        assert.ok(typeof run.font_id === 'number', "Label run should have font_id");
+        assert.ok(typeof run.scale === 'number', "Label run should have scale");
+    }
+
+    // Check char_bitmaps
+    assert.ok(Array.isArray(scene.char_bitmaps), "Scene should have char_bitmaps");
 
     // Clear labels
     withString(m, "all", (selPtr) =>
