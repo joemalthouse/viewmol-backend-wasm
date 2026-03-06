@@ -6845,6 +6845,67 @@ int CRay::character(int char_id)
   return true;
 }
 
+void CRay::beginLabelRun(int font_id)
+{
+  label_runs.emplace_back();
+  current_label_run = &label_runs.back();
+
+  float *v = TextGetPos(G);
+  copy3f(v, current_label_run->origin);
+
+  if (TTTFlag) {
+    transformTTT44f3f(glm::value_ptr(TTT), current_label_run->origin,
+                      current_label_run->origin);
+  }
+
+  current_label_run->v_scale = RayGetScreenVertexScale(this, current_label_run->origin) / Sampling;
+  RayApplyContextToVertex(this, current_label_run->origin);
+
+  // Screen-aligned axes (same computation as character())
+  float xn[3] = {1.0f, 0.0f, 0.0f};
+  float yn[3] = {0.0f, 1.0f, 0.0f};
+  float zn[3] = {0.0f, 0.0f, 1.0f};
+  RayApplyMatrixInverse33(1, (float3*)xn, glm::value_ptr(Rotation), (float3*)xn);
+  RayApplyMatrixInverse33(1, (float3*)yn, glm::value_ptr(Rotation), (float3*)yn);
+  RayApplyMatrixInverse33(1, (float3*)zn, glm::value_ptr(Rotation), (float3*)zn);
+  copy3f(xn, current_label_run->x_axis);
+  copy3f(yn, current_label_run->y_axis);
+  copy3f(zn, current_label_run->normal);
+
+  current_label_run->trans = Trans;
+  copy3f(IntColor, current_label_run->color);
+  current_label_run->font_id = font_id;
+}
+
+void CRay::labelRunChar(int char_id)
+{
+  if (current_label_run) {
+    current_label_run->char_ids.push_back(char_id);
+
+    // Advance the text cursor (needed for multi-char labels and
+    // for RepLabelRenderRayBackground which reads TextGetPos after rendering)
+    int width_i, height_i;
+    float xorig, yorig, advance;
+    CharacterGetGeometry(G, char_id, &width_i, &height_i, &xorig, &yorig, &advance);
+
+    float vt[3];
+    float scale = current_label_run->v_scale * advance;
+    scale3f(current_label_run->x_axis, scale, vt);
+    float *v = TextGetPos(G);
+    add3f(v, vt, vt);
+    TextSetPos(G, vt);
+  } else {
+    character(char_id);
+  }
+}
+
+void CRay::endLabelRun()
+{
+  if (current_label_run && current_label_run->char_ids.empty()) {
+    label_runs.pop_back();
+  }
+  current_label_run = nullptr;
+}
 
 /*========================================================================*/
 int CRay::cylinder3fv(const cgo::draw::cylinder &cyl){

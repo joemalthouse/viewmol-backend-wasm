@@ -104,6 +104,18 @@ namespace draw{
 }
 };
 
+struct LabelRun {
+  float origin[3];             // 3D anchor point of the label
+  float normal[3];             // screen-facing normal (z-axis in world)
+  float x_axis[3];             // screen-right in world coords
+  float y_axis[3];             // screen-up in world coords
+  float v_scale;               // world-units-per-pixel at this depth
+  float color[3];              // text color RGB
+  float trans;                 // transparency (0 = opaque)
+  int font_id;                 // GLUT font identifier
+  std::vector<int> char_ids;   // per-glyph bitmap IDs
+};
+
 struct _CRay {
 
   // methods
@@ -133,6 +145,9 @@ struct _CRay {
   void wobble(int mode, const float *par);
   void transparentf(float t);
   int character(int char_id);
+  void beginLabelRun(int font_id);
+  void labelRunChar(int char_id);
+  void endLabelRun();
   void interiorColor3fv(const float *v, int passive);
   int ellipsoid3fv(const float *v, float r, const float *n1, const float *n2, const float *n3);
   int setLastToNoLighting(char no_lighting);
@@ -175,6 +190,8 @@ struct _CRay {
   float Fov;
   glm::vec3 Pos;
   std::shared_ptr<pymol::Image> bkgrd_data;
+  std::vector<LabelRun> label_runs;
+  LabelRun* current_label_run = nullptr;
 
 private:
   int cylinder3fv(const float *v1, const float *v2, float r, const float *c1, const float *c2,

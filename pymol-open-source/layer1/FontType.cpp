@@ -512,7 +512,10 @@ const char* CFontType::RenderRay(CRay* ray, const char* st, float size,
               add3f(v, x_adj, pos);
               TextSetPos(I->G, pos);
             }
-            ray->character(id);   /* handles advance */
+            if(ray->current_label_run)
+              ray->labelRunChar(id);
+            else
+              ray->character(id);   /* handles advance */
 
             kern_flag = true;
             last_c = c;

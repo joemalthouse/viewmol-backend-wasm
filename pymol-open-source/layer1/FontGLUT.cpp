@@ -428,8 +428,12 @@ const char* CFontGLUT::RenderRay(CRay* ray, const char* st, float size,
                                           (float) ch->yorig,
                                           (float) ch->advance, &fprnt, sampling);
             }
-            if(id)
-              ray->character(id); /* handles advance */
+            if(id) {
+              if(ray->current_label_run)
+                ray->labelRunChar(id);
+              else
+                ray->character(id); /* handles advance */
+            }
           }
         }
       }

@@ -43,6 +43,18 @@ struct CharBitmapPacket {
   std::vector<unsigned char> rgba_data; // RGBA32, row-major, 4*w*h bytes
 };
 
+struct LabelRunPacket {
+  std::array<float, 3> origin{};
+  std::array<float, 3> normal{};
+  std::array<float, 3> x_axis{};
+  std::array<float, 3> y_axis{};
+  float v_scale{};
+  std::array<float, 3> color{};
+  float trans{};
+  int font_id{};
+  std::vector<int> char_ids;
+};
+
 struct ScenePacket {
   std::array<float, 16> model_view{};
   std::array<float, 6> volume{};
@@ -56,6 +68,7 @@ struct ScenePacket {
   std::array<float, 256> random_table{};
   std::vector<PrimitivePacket> primitives{};
   std::vector<CharBitmapPacket> char_bitmaps{};
+  std::vector<LabelRunPacket> label_runs{};
   float ray_improve_shadows{0.1f};
   float ray_shadow_fudge{0.001f};
 };

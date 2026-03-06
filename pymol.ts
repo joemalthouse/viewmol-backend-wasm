@@ -134,8 +134,70 @@ export interface PyMOLModule extends EmscriptenModuleBase {
     // Ray scene export (out_ptr is a pointer to a char* that receives a malloc'd buffer)
     _PyMOLWasm_GetRayScene(pymolPtr: number, width: number, height: number, outPtr: number, unused: number): number;
 
+    // --- Issue 1: Viewing / Display ---
+    _PyMOLWasm_Enable(pymolPtr: number, name: number): number;
+    _PyMOLWasm_Disable(pymolPtr: number, name: number): number;
+    _PyMOLWasm_Orient(pymolPtr: number, selection: number): number;
+    _PyMOLWasm_Clip(pymolPtr: number, mode: number, movement: number, selection: number): number;
+    _PyMOLWasm_Move(pymolPtr: number, axis: number, dist: number): number;
+    _PyMOLWasm_Reset(pymolPtr: number, name: number): number;
+    _PyMOLWasm_BgColor(pymolPtr: number, color: number): number;
+    _PyMOLWasm_Cartoon(pymolPtr: number, type: number, selection: number): number;
+    _PyMOLWasm_Toggle(pymolPtr: number, rep: number, selection: number): number;
+    _PyMOLWasm_Rebuild(pymolPtr: number): number;
+    _PyMOLWasm_Volume(pymolPtr: number, volumeName: number, mapName: number, level: number, selection: number, buffer: number, state: number, carve: number, mapState: number): number;
+    _PyMOLWasm_Isolevel(pymolPtr: number, name: number, level: number, state: number): number;
+
+    // --- Issue 1: Structure Manipulation ---
+    _PyMOLWasm_HAdd(pymolPtr: number, selection: number): number;
+    _PyMOLWasm_Protect(pymolPtr: number, selection: number, mode: number): number;
+    _PyMOLWasm_Mask(pymolPtr: number, selection: number, mode: number): number;
+    _PyMOLWasm_Flag(pymolPtr: number, flag: number, selection: number, action: number): number;
+    _PyMOLWasm_SetDihedral(pymolPtr: number, s0: number, s1: number, s2: number, s3: number, value: number, state: number): number;
+    _PyMOLWasm_Sort(pymolPtr: number, name: number): number;
+    _PyMOLWasm_SculptActivate(pymolPtr: number, name: number): number;
+    _PyMOLWasm_SculptIterate(pymolPtr: number, name: number, state: number, nCycles: number): number;
+    _PyMOLWasm_Reinitialize(pymolPtr: number, what: number): number;
+    _PyMOLWasm_Pseudoatom(pymolPtr: number, objectName: number, selection: number, name: number, resn: number, chain: number, pos: number, labelText: number, state: number): number;
+
+    // --- Issue 1: Object Management ---
+    _PyMOLWasm_SetName(pymolPtr: number, oldName: number, newName: number): number;
+    _PyMOLWasm_SetTitle(pymolPtr: number, name: number, state: number, text: number): number;
+    _PyMOLWasm_Order(pymolPtr: number, names: number, sort: number, location: number): number;
+    _PyMOLWasm_Group(pymolPtr: number, name: number, members: number, action: number): number;
+    _PyMOLWasm_SetObjectColor(pymolPtr: number, name: number, color: number): number;
+
+    // --- Issue 1: Settings ---
+    _PyMOLWasm_UnsetSetting(pymolPtr: number, index: number, selection: number, state: number): number;
+    _PyMOLWasm_SetSymmetry(pymolPtr: number, selection: number, state: number, a: number, b: number, c: number, alpha: number, beta: number, gamma: number, sgroup: number): number;
+
+    // --- Issue 2: Atom Property Access ---
+    _PyMOLWasm_SetAtomPropertyFloat(pymolPtr: number, selection: number, property: number, value: number): number;
+    _PyMOLWasm_SetAtomPropertyInt(pymolPtr: number, selection: number, property: number, value: number): number;
+    _PyMOLWasm_SetAtomPropertyString(pymolPtr: number, selection: number, property: number, value: number): number;
+    _PyMOLWasm_GetAtomPropertyFloat(pymolPtr: number, selection: number, property: number, outBuf: number, bufSize: number): number;
+    _PyMOLWasm_GetAtomPropertyInt(pymolPtr: number, selection: number, property: number, outBuf: number, bufSize: number): number;
+    _PyMOLWasm_GetAtomPropertyString(pymolPtr: number, selection: number, property: number, outPtr: number): number;
+
+    // --- Issue 3: File Export ---
+    _PyMOLWasm_GetStr(pymolPtr: number, format: number, selection: number, state: number, outPtr: number): number;
+
+    // --- Issue 6: Introspection ---
+    _PyMOLWasm_GetNames(pymolPtr: number, mode: number, outPtr: number): number;
+    _PyMOLWasm_GetType(pymolPtr: number, name: number, outPtr: number): number;
+    _PyMOLWasm_CountStates(pymolPtr: number, selection: number): number;
+    _PyMOLWasm_GetChains(pymolPtr: number, selection: number, state: number, outPtr: number): number;
+    _PyMOLWasm_GetSettingFloat(pymolPtr: number, index: number): number;
+    _PyMOLWasm_GetSettingInt(pymolPtr: number, index: number): number;
+    _PyMOLWasm_GetSceneList(pymolPtr: number, outPtr: number): number;
+    _PyMOLWasm_GetSymmetry(pymolPtr: number, selection: number, state: number, outParams: number, outSgroup: number): number;
+    _PyMOLWasm_GetColorTuple(pymolPtr: number, colorName: number, outRgb: number): number;
+    _PyMOLWasm_GetObjectMatrix(pymolPtr: number, name: number, state: number, outMatrix: number): number;
+    _PyMOLWasm_GetTitle(pymolPtr: number, name: number, state: number, outPtr: number): number;
+
     // Emscripten HEAP32 view for reading pointers
     HEAP32: Int32Array;
+    HEAPF64: Float64Array;
 }
 
 /** PDB string load format constant (cLoadTypePDBStr) */

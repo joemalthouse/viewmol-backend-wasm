@@ -218,6 +218,54 @@ ScenePacket buildScenePacket(const CRay* ray)
     }
   }
 
+  // Copy label runs.
+  for (const auto& run : ray->label_runs) {
+    LabelRunPacket lrp;
+    for (int i = 0; i < 3; ++i) {
+      lrp.origin[i] = run.origin[i];
+      lrp.normal[i] = run.normal[i];
+      lrp.x_axis[i] = run.x_axis[i];
+      lrp.y_axis[i] = run.y_axis[i];
+      lrp.color[i]  = run.color[i];
+    }
+    lrp.v_scale = run.v_scale;
+    lrp.trans = run.trans;
+    lrp.font_id = run.font_id;
+    lrp.char_ids = run.char_ids;
+    s.label_runs.emplace_back(std::move(lrp));
+  }
+
+  // Also collect char bitmaps referenced by label runs (in case character()
+  // was never called for these IDs and they weren't collected above).
+  {
+    std::set<int> seen;
+    for (const auto& cb : s.char_bitmaps) seen.insert(cb.char_id);
+    for (const auto& lr : s.label_runs)
+      for (int cid : lr.char_ids)
+        if (cid > 0) seen.insert(cid);
+
+    auto* charObj = ray->G->Character;
+    if (charObj) {
+      // Re-scan: add any char_ids from label_runs not already in char_bitmaps
+      std::set<int> existing;
+      for (const auto& cb : s.char_bitmaps) existing.insert(cb.char_id);
+      for (int cid : seen) {
+        if (existing.count(cid)) continue;
+        if (cid > charObj->MaxAlloc) continue;
+        const auto& cr = charObj->Char[cid];
+        if (!cr.Pixmap.buffer || cr.Pixmap.width <= 0 || cr.Pixmap.height <= 0)
+          continue;
+        CharBitmapPacket bp;
+        bp.char_id = cid;
+        bp.width = cr.Pixmap.width;
+        bp.height = cr.Pixmap.height;
+        std::size_t nbytes = static_cast<std::size_t>(bp.width) * bp.height * 4;
+        bp.rgba_data.assign(cr.Pixmap.buffer, cr.Pixmap.buffer + nbytes);
+        s.char_bitmaps.emplace_back(std::move(bp));
+      }
+    }
+  }
+
   s.ray_improve_shadows = SettingGetGlobal_f(ray->G, cSetting_ray_improve_shadows);
   s.ray_shadow_fudge = SettingGetGlobal_f(ray->G, cSetting_ray_shadow_fudge);
 
@@ -289,6 +337,28 @@ std::string serializeScenePacketJSON(const ScenePacket& scene)
     for (std::size_t bi = 0; bi < cb.rgba_data.size(); ++bi) {
       if (bi) o += ',';
       jUint(o, static_cast<std::uint32_t>(cb.rgba_data[bi]));
+    }
+    o += "]}";
+  }
+  o += ']';
+
+  // Label runs (batched text labels).
+  o += ",\"label_runs\":[";
+  for (std::size_t li = 0; li < scene.label_runs.size(); ++li) {
+    if (li) o += ',';
+    const auto& lr = scene.label_runs[li];
+    o += "{\"origin\":";  jFloatArray(o, lr.origin);
+    o += ",\"normal\":";  jFloatArray(o, lr.normal);
+    o += ",\"x_axis\":";  jFloatArray(o, lr.x_axis);
+    o += ",\"y_axis\":";  jFloatArray(o, lr.y_axis);
+    o += ",\"v_scale\":";  jFloat(o, lr.v_scale);
+    o += ",\"color\":";   jFloatArray(o, lr.color);
+    o += ",\"trans\":";   jFloat(o, lr.trans);
+    o += ",\"font_id\":"; jInt(o, lr.font_id);
+    o += ",\"char_ids\":[";
+    for (std::size_t ci = 0; ci < lr.char_ids.size(); ++ci) {
+      if (ci) o += ',';
+      jInt(o, lr.char_ids[ci]);
     }
     o += "]}";
   }

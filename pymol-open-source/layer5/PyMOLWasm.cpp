@@ -18,6 +18,10 @@
 #include "MovieScene.h"
 #include "Vector.h"
 #include "Rep.h"
+#include "P.h"
+#include "Lex.h"
+#include "Seq.h"
+#include "MoleculeExporter.h"
 #include <cstring>
 #include <climits>
 
@@ -52,6 +56,38 @@ static int rep_name_to_id(const char* rep_name) {
     if (strcmp(rep_name, "cgo") == 0) return cRepCGO;
     if (strcmp(rep_name, "ellipsoids") == 0) return cRepEllipsoid;
     return -1;
+}
+
+/**
+ * Serializes a vector of C-strings to a JSON array string.
+ */
+static std::string cstr_vec_to_json(const std::vector<const char*>& items) {
+    std::string json = "[";
+    for (size_t i = 0; i < items.size(); i++) {
+        if (i > 0) json += ",";
+        json += "\"";
+        const char* s = items[i] ? items[i] : "";
+        while (*s) {
+            if (*s == '"' || *s == '\\') json += '\\';
+            json += *s;
+            s++;
+        }
+        json += "\"";
+    }
+    json += "]";
+    return json;
+}
+
+/**
+ * Allocates a malloc'd copy of a string and writes it to *out_ptr.
+ * Returns the string length (excluding null terminator).
+ */
+static int alloc_output_string(const std::string& str, char** out_ptr) {
+    char* buf = static_cast<char*>(malloc(str.size() + 1));
+    if (!buf) return 0;
+    std::memcpy(buf, str.c_str(), str.size() + 1);
+    *out_ptr = buf;
+    return static_cast<int>(str.size());
 }
 
 extern "C" {
@@ -1157,6 +1193,980 @@ int PyMOLWasm_Distance(CPyMOL* pymolPtr, const char* name,
 
     auto result = ExecutiveDistance(G, nm, s1, s2, mode, -1.0f, 1, 1, 0, -1, 0);
     return static_cast<bool>(result) ? 1 : 0;
+}
+
+// ============================================================
+// Viewing / Display
+// ============================================================
+
+/**
+ * Enables (shows) an object in the object panel.
+ * @param name Object name (must be non-null).
+ */
+int PyMOLWasm_Enable(CPyMOL* pymolPtr, const char* name) {
+    if (!pymolPtr || !name) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveSetObjVisib(G, name, 1, 0);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Disables (hides) an object in the object panel.
+ * @param name Object name (must be non-null).
+ */
+int PyMOLWasm_Disable(CPyMOL* pymolPtr, const char* name) {
+    if (!pymolPtr || !name) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveSetObjVisib(G, name, 0, 0);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Orients the view to show a selection with its principal axes aligned.
+ * @param selection Selection string (null-safe, defaults to "all").
+ */
+int PyMOLWasm_Orient(CPyMOL* pymolPtr, const char* selection) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveOrient(G, safe_str(selection), -1, 0.0f, 0, 0.0f, 1);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Adjusts clipping planes.
+ * @param mode Clipping mode: "near", "far", "move", "slab", "atoms", etc.
+ * @param movement Distance to move the clipping plane (positive = away from camera).
+ * @param selection Selection for atom-based clipping (null-safe).
+ */
+int PyMOLWasm_Clip(CPyMOL* pymolPtr, const char* mode, float movement,
+                   const char* selection) {
+    if (!pymolPtr || !mode) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = SceneClipFromMode(G, mode, movement, safe_str(selection), -1);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Moves the camera along an axis.
+ * @param axis Axis name: "x", "y", or "z" (must be non-null).
+ * @param dist Distance to move.
+ */
+int PyMOLWasm_Move(CPyMOL* pymolPtr, const char* axis, float dist) {
+    if (!pymolPtr || !axis) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveMove(G, axis, dist);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Resets the view or a named object to its initial state.
+ * @param name Object name (null-safe, empty resets view).
+ */
+int PyMOLWasm_Reset(CPyMOL* pymolPtr, const char* name) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveReset(G, safe_str(name));
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Sets the background color by name.
+ * @param color Color name, e.g. "white", "black" (must be non-null).
+ */
+int PyMOLWasm_BgColor(CPyMOL* pymolPtr, const char* color) {
+    if (!pymolPtr || !color) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveBackgroundColor(G, color);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Sets the cartoon type for a selection.
+ * @param type Cartoon type (0=automatic, 1=loop, 2=rect, 3=oval, etc.).
+ * @param selection Selection string (null-safe).
+ */
+int PyMOLWasm_Cartoon(CPyMOL* pymolPtr, int type, const char* selection) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveCartoon(G, type, safe_str(selection));
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Toggles the visibility of a representation for a selection.
+ * @param rep Representation name (e.g. "cartoon", "sticks").
+ * @param selection Selection string (null-safe).
+ */
+int PyMOLWasm_Toggle(CPyMOL* pymolPtr, const char* rep, const char* selection) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    int rep_id = rep_name_to_id(rep);
+    if (rep_id < 0) return 0;
+    auto result = ExecutiveToggleRepVisib(G, safe_str(selection), rep_id);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Forces a rebuild of all representations.
+ */
+int PyMOLWasm_Rebuild(CPyMOL* pymolPtr) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    ExecutiveRebuildAll(G);
+    return 1;
+}
+
+/**
+ * Creates a volume object from a map.
+ * @param volume_name Name for the volume object (must be non-null).
+ * @param map_name Source map name (must be non-null).
+ * @param level Contour level.
+ * @param selection Selection string (null-safe).
+ * @param buffer Buffer distance around selection.
+ * @param state Object state.
+ * @param carve Carve distance (0 = no carving).
+ * @param map_state Map state to use.
+ */
+int PyMOLWasm_Volume(CPyMOL* pymolPtr, const char* volume_name,
+                     const char* map_name, float level, const char* selection,
+                     float buffer, int state, float carve, int map_state) {
+    if (!pymolPtr || !volume_name || !map_name) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveVolume(G, volume_name, map_name, level,
+                                  safe_str(selection), buffer, state, carve,
+                                  map_state, 1);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Sets the contour level for an isomesh/isosurface object.
+ * @param name Object name (must be non-null).
+ * @param level New contour level.
+ * @param state Object state (-1 for all).
+ */
+int PyMOLWasm_Isolevel(CPyMOL* pymolPtr, const char* name, float level,
+                       int state) {
+    if (!pymolPtr || !name) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveIsolevel(G, name, level, state, 1);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+// ============================================================
+// Structure Manipulation
+// ============================================================
+
+/**
+ * Adds hydrogens to a selection.
+ * @param selection Selection string (null-safe, defaults to "all").
+ */
+int PyMOLWasm_HAdd(CPyMOL* pymolPtr, const char* selection) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveAddHydrogens(G, safe_str(selection), 1);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Protects or deprotects atoms from modification.
+ * @param selection Selection string (null-safe).
+ * @param mode 1 = protect, 0 = deprotect.
+ */
+int PyMOLWasm_Protect(CPyMOL* pymolPtr, const char* selection, int mode) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveProtect(G, safe_str(selection), mode, 1);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Masks or unmasks atoms from selection.
+ * @param selection Selection string (null-safe).
+ * @param mode 1 = mask, 0 = unmask.
+ */
+int PyMOLWasm_Mask(CPyMOL* pymolPtr, const char* selection, int mode) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveMask(G, safe_str(selection), mode, 1);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Sets atom flags.
+ * @param flag Flag index.
+ * @param selection Selection string (null-safe).
+ * @param action 0 = reset, 1 = set, 2 = clear.
+ */
+int PyMOLWasm_Flag(CPyMOL* pymolPtr, int flag, const char* selection,
+                   int action) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveFlag(G, flag, safe_str(selection), action, 1);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Sets the dihedral angle between four atom selections.
+ * @param s0, s1, s2, s3 Single-atom selections (must be non-null).
+ * @param value Dihedral angle in degrees.
+ * @param state Object state (0-based, or -1 for current).
+ */
+int PyMOLWasm_SetDihedral(CPyMOL* pymolPtr, const char* s0, const char* s1,
+                          const char* s2, const char* s3, float value,
+                          int state) {
+    if (!pymolPtr || !s0 || !s1 || !s2 || !s3) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveSetDihe(G, s0, s1, s2, s3, value, state, 1);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Sorts atoms within an object.
+ * @param name Object name (null-safe).
+ */
+int PyMOLWasm_Sort(CPyMOL* pymolPtr, const char* name) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveSort(G, safe_str(name));
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Activates sculpting (energy minimization) for an object.
+ * @param name Object name (null-safe).
+ */
+int PyMOLWasm_SculptActivate(CPyMOL* pymolPtr, const char* name) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    ExecutiveSculptActivate(G, safe_str(name));
+    return 1;
+}
+
+/**
+ * Runs sculpting iterations on an object.
+ * @param name Object name (null-safe).
+ * @param state Object state (-1 for all).
+ * @param n_cycles Number of sculpting cycles.
+ * @return Total strain energy, or -1.0 on failure.
+ */
+float PyMOLWasm_SculptIterate(CPyMOL* pymolPtr, const char* name, int state,
+                              int n_cycles) {
+    if (!pymolPtr) return -1.0f;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return -1.0f;
+    return ExecutiveSculptIterate(G, safe_str(name), state, n_cycles);
+}
+
+/**
+ * Reinitializes PyMOL state.
+ * @param what What to reinitialize (0 = everything, 1 = settings, 2 = stored).
+ */
+int PyMOLWasm_Reinitialize(CPyMOL* pymolPtr, int what) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveReinitialize(G, what, "");
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Creates a pseudoatom in an object.
+ * @param object_name Target object name (must be non-null).
+ * @param selection Selection for positioning (null-safe).
+ * @param name Atom name (null-safe).
+ * @param resn Residue name (null-safe).
+ * @param chain Chain identifier (null-safe).
+ * @param pos 3D position array, or null to use selection center.
+ * @param label_text Label text (null-safe).
+ * @param state Target state (-1 for current).
+ */
+int PyMOLWasm_Pseudoatom(CPyMOL* pymolPtr, const char* object_name,
+                         const char* selection, const char* name,
+                         const char* resn, const char* chain,
+                         const float* pos, const char* label_text,
+                         int state) {
+    if (!pymolPtr || !object_name) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutivePseudoatom(G, object_name, safe_str(selection),
+        safe_str(name), safe_str(resn), "", safe_str(chain), "", "C",
+        -1.0f, 1, 0.0f, 1.0f, safe_str(label_text), pos, -1, state, 0, 1);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+// ============================================================
+// Object Management
+// ============================================================
+
+/**
+ * Renames an object.
+ * @param old_name Current name (must be non-null).
+ * @param new_name New name (must be non-null).
+ */
+int PyMOLWasm_SetName(CPyMOL* pymolPtr, const char* old_name,
+                      const char* new_name) {
+    if (!pymolPtr || !old_name || !new_name) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveSetName(G, old_name, new_name);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Sets the title string for an object state.
+ * @param name Object name (must be non-null).
+ * @param state State index (0-based).
+ * @param text Title text (must be non-null).
+ */
+int PyMOLWasm_SetTitle(CPyMOL* pymolPtr, const char* name, int state,
+                       const char* text) {
+    if (!pymolPtr || !name || !text) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveSetTitle(G, name, state, text);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Reorders objects in the object panel.
+ * @param names Space-separated object names (must be non-null).
+ * @param sort 0 = manual order, 1 = sort alphabetically.
+ * @param location 0 = top, -1 = current, 1 = bottom.
+ */
+int PyMOLWasm_Order(CPyMOL* pymolPtr, const char* names, int sort,
+                    int location) {
+    if (!pymolPtr || !names) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveOrder(G, names, sort, location);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Creates or modifies an object group.
+ * @param name Group name (must be non-null).
+ * @param members Space-separated member names (null-safe).
+ * @param action 0 = add, 1 = remove, 2 = open, 3 = close, 4 = toggle, 5 = auto, 6 = ungroup.
+ */
+int PyMOLWasm_Group(CPyMOL* pymolPtr, const char* name, const char* members,
+                    int action) {
+    if (!pymolPtr || !name) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    ExecutiveGroup(G, name, safe_str(members), action, 1);
+    return 1;
+}
+
+/**
+ * Sets the default color for an object.
+ * @param name Object name (must be non-null).
+ * @param color Color name (must be non-null).
+ */
+int PyMOLWasm_SetObjectColor(CPyMOL* pymolPtr, const char* name,
+                             const char* color) {
+    if (!pymolPtr || !name || !color) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveSetObjectColor(G, name, color, 1);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+// ============================================================
+// Settings
+// ============================================================
+
+/**
+ * Unsets a setting, reverting it to default.
+ * @param index Setting index from SettingInfo.h.
+ * @param selection Selection/object name (null-safe, empty for global).
+ * @param state Object state (-1 for all).
+ */
+int PyMOLWasm_UnsetSetting(CPyMOL* pymolPtr, int index, const char* selection,
+                           int state) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveUnsetSetting(G, index, safe_str(selection), state, 1, 1);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Sets the crystallographic symmetry for an object.
+ * @param selection Object/selection name (null-safe).
+ * @param state Object state.
+ * @param a, b, c Unit cell dimensions in Angstroms.
+ * @param alpha, beta, gamma Unit cell angles in degrees.
+ * @param sgroup Space group name (null-safe).
+ */
+int PyMOLWasm_SetSymmetry(CPyMOL* pymolPtr, const char* selection, int state,
+                          float a, float b, float c,
+                          float alpha, float beta, float gamma,
+                          const char* sgroup) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    auto result = ExecutiveSetSymmetry(G, safe_str(selection), state, a, b, c,
+                                       alpha, beta, gamma, safe_str(sgroup), 1);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+// ============================================================
+// File Export
+// ============================================================
+
+/**
+ * Exports molecular data as a string in the specified format.
+ * Supports: "pdb", "sdf", "cif", "mol2", "mol", "pqr", "xyz", "mae", "pmcif".
+ *
+ * @param format Format string (must be non-null).
+ * @param selection Atom selection (null-safe, defaults to "all").
+ * @param state State index (-1 for current, 0 for all).
+ * @param out_ptr Receives malloc'd string buffer; caller must free().
+ * @return Length of the output string, or 0 on failure.
+ */
+int PyMOLWasm_GetStr(CPyMOL* pymolPtr, const char* format,
+                      const char* selection, int state, char** out_ptr) {
+    if (!pymolPtr || !format || !out_ptr) return 0;
+    *out_ptr = nullptr;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    auto vla = MoleculeExporterGetStr(G, format, safe_str(selection),
+                                       state, "", -1, -1, true);
+    if (!vla) return 0;
+
+    size_t len = vla.size();
+    char* buf = static_cast<char*>(malloc(len + 1));
+    if (!buf) return 0;
+    std::memcpy(buf, vla.data(), len);
+    buf[len] = '\0';
+    *out_ptr = buf;
+    return static_cast<int>(len);
+}
+
+// ============================================================
+// Atom Property Access (alter/iterate equivalent)
+// ============================================================
+
+/**
+ * Applies side effects after modifying an atom property.
+ * Mirrors WrapperObjectAssignSubScript behavior in PyMOL.cpp.
+ */
+static void apply_property_side_effects(PyMOLGlobals* G, AtomInfoType* ai,
+                                         const char* prop) {
+    if (strcmp(prop, "elem") == 0) {
+        AtomInfoAssignParameters(G, ai);
+    } else if (strcmp(prop, "resv") == 0 || strcmp(prop, "resi") == 0) {
+        ai->inscode = '\0';
+    } else if (strcmp(prop, "ss") == 0) {
+        if (ai->ssType[0] >= 'a' && ai->ssType[0] <= 'z')
+            ai->ssType[0] -= ('a' - 'A');
+    } else if (strcmp(prop, "formal_charge") == 0) {
+        ai->chemFlag = 0;
+    }
+}
+
+/**
+ * Sets a float atom property for all atoms matching a selection.
+ * Equivalent to `cmd.alter(selection, "property=value")` for float properties.
+ *
+ * @param selection Atom selection expression (null-safe).
+ * @param property Property name: "b", "q", "vdw", "partial_charge", etc.
+ * @param value Float value to set.
+ * @return Number of atoms modified, or 0 on failure.
+ */
+int PyMOLWasm_SetAtomPropertyFloat(CPyMOL* pymolPtr, const char* selection,
+                                    const char* property, float value) {
+    if (!pymolPtr || !property) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    const auto* info = PyMOL_GetAtomPropertyInfo(pymolPtr, property);
+    if (!info || info->Ptype != cPType_float) return 0;
+
+    int count = 0;
+    ObjectMolecule* prev_obj = nullptr;
+    SeleAtomIterator iter(G, safe_str(selection));
+    while (iter.next()) {
+        AtomInfoType* ai = iter.getAtomInfo();
+        float* field = (float*)((char*)ai + info->offset);
+        *field = value;
+        apply_property_side_effects(G, ai, property);
+        if (iter.obj != prev_obj) {
+            iter.obj->invalidate(cRepAll, cRepInvAll, -1);
+            prev_obj = iter.obj;
+        }
+        count++;
+    }
+    if (count > 0) SeqChanged(G);
+    return count;
+}
+
+/**
+ * Sets an integer atom property for all atoms matching a selection.
+ * Handles int, signed char, and unsigned int property types.
+ *
+ * @param selection Atom selection expression (null-safe).
+ * @param property Property name: "color", "resv", "formal_charge", "numeric_type", etc.
+ * @param value Integer value to set.
+ * @return Number of atoms modified, or 0 on failure.
+ */
+int PyMOLWasm_SetAtomPropertyInt(CPyMOL* pymolPtr, const char* selection,
+                                  const char* property, int value) {
+    if (!pymolPtr || !property) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    const auto* info = PyMOL_GetAtomPropertyInfo(pymolPtr, property);
+    if (!info) return 0;
+
+    int count = 0;
+    ObjectMolecule* prev_obj = nullptr;
+    SeleAtomIterator iter(G, safe_str(selection));
+    while (iter.next()) {
+        AtomInfoType* ai = iter.getAtomInfo();
+        switch (info->Ptype) {
+            case cPType_int:
+                *(int*)((char*)ai + info->offset) = value;
+                break;
+            case cPType_schar:
+                *(signed char*)((char*)ai + info->offset) = static_cast<signed char>(value);
+                break;
+            case cPType_uint32:
+                *(unsigned int*)((char*)ai + info->offset) = static_cast<unsigned int>(value);
+                break;
+            default:
+                return 0;
+        }
+        apply_property_side_effects(G, ai, property);
+        if (iter.obj != prev_obj) {
+            iter.obj->invalidate(cRepAll, cRepInvAll, -1);
+            prev_obj = iter.obj;
+        }
+        count++;
+    }
+    if (count > 0) SeqChanged(G);
+    return count;
+}
+
+/**
+ * Sets a string atom property for all atoms matching a selection.
+ * Handles both lexicon-indexed strings (name, resn, chain, segi, etc.)
+ * and fixed-length char arrays (elem, ss).
+ *
+ * @param selection Atom selection expression (null-safe).
+ * @param property Property name: "name", "resn", "chain", "elem", "ss", "segi", etc.
+ * @param value String value to set (must be non-null).
+ * @return Number of atoms modified, or 0 on failure.
+ */
+int PyMOLWasm_SetAtomPropertyString(CPyMOL* pymolPtr, const char* selection,
+                                      const char* property, const char* value) {
+    if (!pymolPtr || !property || !value) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    const auto* info = PyMOL_GetAtomPropertyInfo(pymolPtr, property);
+    if (!info) return 0;
+
+    int count = 0;
+    ObjectMolecule* prev_obj = nullptr;
+    SeleAtomIterator iter(G, safe_str(selection));
+    while (iter.next()) {
+        AtomInfoType* ai = iter.getAtomInfo();
+        switch (info->Ptype) {
+            case cPType_int_as_string: {
+                lexidx_t* field = (lexidx_t*)((char*)ai + info->offset);
+                LexAssign(G, *field, value);
+                break;
+            }
+            case cPType_string: {
+                char* field = (char*)ai + info->offset;
+                strncpy(field, value, info->maxlen);
+                field[info->maxlen - 1] = '\0';
+                break;
+            }
+            default:
+                return 0;
+        }
+        apply_property_side_effects(G, ai, property);
+        if (iter.obj != prev_obj) {
+            iter.obj->invalidate(cRepAll, cRepInvAll, -1);
+            prev_obj = iter.obj;
+        }
+        count++;
+    }
+    if (count > 0) SeqChanged(G);
+    return count;
+}
+
+/**
+ * Reads a float atom property from all atoms matching a selection.
+ * Equivalent to `cmd.iterate(selection, "stored.list.append(property)")` for floats.
+ *
+ * @param selection Atom selection expression (null-safe).
+ * @param property Property name: "b", "q", "vdw", "partial_charge", etc.
+ * @param out_buf Pre-allocated float buffer.
+ * @param buf_size Number of floats that fit in out_buf.
+ * @return Number of atoms read, or 0 on failure.
+ */
+int PyMOLWasm_GetAtomPropertyFloat(CPyMOL* pymolPtr, const char* selection,
+                                    const char* property, float* out_buf,
+                                    int buf_size) {
+    if (!pymolPtr || !property || !out_buf || buf_size <= 0) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    const auto* info = PyMOL_GetAtomPropertyInfo(pymolPtr, property);
+    if (!info || info->Ptype != cPType_float) return 0;
+
+    int count = 0;
+    SeleAtomIterator iter(G, safe_str(selection));
+    while (iter.next() && count < buf_size) {
+        AtomInfoType* ai = iter.getAtomInfo();
+        out_buf[count++] = *(float*)((char*)ai + info->offset);
+    }
+    return count;
+}
+
+/**
+ * Reads an integer atom property from all atoms matching a selection.
+ *
+ * @param selection Atom selection expression (null-safe).
+ * @param property Property name: "color", "resv", "formal_charge", etc.
+ * @param out_buf Pre-allocated int buffer.
+ * @param buf_size Number of ints that fit in out_buf.
+ * @return Number of atoms read, or 0 on failure.
+ */
+int PyMOLWasm_GetAtomPropertyInt(CPyMOL* pymolPtr, const char* selection,
+                                  const char* property, int* out_buf,
+                                  int buf_size) {
+    if (!pymolPtr || !property || !out_buf || buf_size <= 0) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    const auto* info = PyMOL_GetAtomPropertyInfo(pymolPtr, property);
+    if (!info) return 0;
+
+    int count = 0;
+    SeleAtomIterator iter(G, safe_str(selection));
+    while (iter.next() && count < buf_size) {
+        AtomInfoType* ai = iter.getAtomInfo();
+        switch (info->Ptype) {
+            case cPType_int:
+                out_buf[count++] = *(int*)((char*)ai + info->offset);
+                break;
+            case cPType_schar:
+                out_buf[count++] = *(signed char*)((char*)ai + info->offset);
+                break;
+            case cPType_uint32:
+                out_buf[count++] = static_cast<int>(*(unsigned int*)((char*)ai + info->offset));
+                break;
+            default:
+                return 0;
+        }
+    }
+    return count;
+}
+
+/**
+ * Reads a string atom property from all atoms matching a selection.
+ * Returns a JSON array of strings via a malloc'd buffer.
+ *
+ * @param selection Atom selection expression (null-safe).
+ * @param property Property name: "name", "resn", "chain", "elem", "ss", etc.
+ * @param out_ptr Pointer to a char* that will receive the malloc'd JSON buffer.
+ *                Caller must free() this buffer when done.
+ * @return Number of atoms read, or 0 on failure.
+ */
+int PyMOLWasm_GetAtomPropertyString(CPyMOL* pymolPtr, const char* selection,
+                                      const char* property, char** out_ptr) {
+    if (!pymolPtr || !property || !out_ptr) return 0;
+    *out_ptr = nullptr;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    const auto* info = PyMOL_GetAtomPropertyInfo(pymolPtr, property);
+    if (!info) return 0;
+
+    std::string json = "[";
+    int count = 0;
+    SeleAtomIterator iter(G, safe_str(selection));
+    while (iter.next()) {
+        AtomInfoType* ai = iter.getAtomInfo();
+        const char* str_val = nullptr;
+
+        switch (info->Ptype) {
+            case cPType_int_as_string: {
+                lexidx_t idx = *(lexidx_t*)((char*)ai + info->offset);
+                str_val = LexStr(G, idx);
+                break;
+            }
+            case cPType_string:
+                str_val = (const char*)ai + info->offset;
+                break;
+            default:
+                return 0;
+        }
+
+        if (count > 0) json += ",";
+        json += "\"";
+        // Escape any quotes or backslashes in the string value
+        const char* s = str_val ? str_val : "";
+        while (*s) {
+            if (*s == '"' || *s == '\\') json += '\\';
+            json += *s;
+            s++;
+        }
+        json += "\"";
+        count++;
+    }
+    json += "]";
+
+    char* buf = static_cast<char*>(malloc(json.size() + 1));
+    if (!buf) return 0;
+    std::memcpy(buf, json.c_str(), json.size() + 1);
+    *out_ptr = buf;
+    return count;
+}
+
+// ============================================================
+// Introspection / Queries
+// ============================================================
+
+/**
+ * Returns a JSON array of object/selection names.
+ * @param mode 0=all, 1=objects, 2=selections, 3=public, 4=groups, 5=non-groups.
+ * @param out_ptr Receives malloc'd JSON string; caller must free().
+ * @return Number of names, or 0 on failure.
+ */
+int PyMOLWasm_GetNames(CPyMOL* pymolPtr, int mode, char** out_ptr) {
+    if (!pymolPtr || !out_ptr) return 0;
+    *out_ptr = nullptr;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    auto result = ExecutiveGetNames(G, mode, 0, "");
+    if (!result) return 0;
+
+    const auto& names = result.result();
+    std::string json = cstr_vec_to_json(names);
+    alloc_output_string(json, out_ptr);
+    return static_cast<int>(names.size());
+}
+
+/**
+ * Returns the type of a named object as a string.
+ * @param name Object name (must be non-null).
+ * @param out_ptr Receives malloc'd type string; caller must free().
+ * @return Length of the type string, or 0 on failure.
+ */
+int PyMOLWasm_GetType(CPyMOL* pymolPtr, const char* name, char** out_ptr) {
+    if (!pymolPtr || !name || !out_ptr) return 0;
+    *out_ptr = nullptr;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    auto result = ExecutiveGetType(G, name);
+    if (!result) return 0;
+
+    return alloc_output_string(result.result(), out_ptr);
+}
+
+/**
+ * Returns the number of states in a selection/object.
+ * @param selection Selection string (null-safe).
+ */
+int PyMOLWasm_CountStates(CPyMOL* pymolPtr, const char* selection) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    return ExecutiveCountStates(G, safe_str(selection));
+}
+
+/**
+ * Returns a JSON array of chain identifiers for a selection.
+ * @param selection Selection string (null-safe).
+ * @param state Object state (-1 for current).
+ * @param out_ptr Receives malloc'd JSON string; caller must free().
+ * @return Number of chains, or 0 on failure.
+ */
+int PyMOLWasm_GetChains(CPyMOL* pymolPtr, const char* selection, int state,
+                         char** out_ptr) {
+    if (!pymolPtr || !out_ptr) return 0;
+    *out_ptr = nullptr;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    auto result = ExecutiveGetChains(G, safe_str(selection), state);
+    if (!result) return 0;
+
+    const auto& chains = result.result();
+    std::string json = cstr_vec_to_json(chains);
+    alloc_output_string(json, out_ptr);
+    return static_cast<int>(chains.size());
+}
+
+/**
+ * Gets a global float setting value.
+ * @param index Setting index from SettingInfo.h.
+ */
+float PyMOLWasm_GetSettingFloat(CPyMOL* pymolPtr, int index) {
+    if (!pymolPtr) return 0.0f;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0.0f;
+    return SettingGetGlobal_f(G, index);
+}
+
+/**
+ * Gets a global integer setting value.
+ * @param index Setting index from SettingInfo.h.
+ */
+int PyMOLWasm_GetSettingInt(CPyMOL* pymolPtr, int index) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+    return SettingGetGlobal_i(G, index);
+}
+
+/**
+ * Returns a JSON array of stored scene names.
+ * @param out_ptr Receives malloc'd JSON string; caller must free().
+ * @return Number of scenes, or 0 on failure.
+ */
+int PyMOLWasm_GetSceneList(CPyMOL* pymolPtr, char** out_ptr) {
+    if (!pymolPtr || !out_ptr) return 0;
+    *out_ptr = nullptr;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    const auto& order = MovieSceneGetOrder(G);
+    std::string json = "[";
+    for (size_t i = 0; i < order.size(); i++) {
+        if (i > 0) json += ",";
+        json += "\"";
+        for (char c : order[i]) {
+            if (c == '"' || c == '\\') json += '\\';
+            json += c;
+        }
+        json += "\"";
+    }
+    json += "]";
+
+    alloc_output_string(json, out_ptr);
+    return static_cast<int>(order.size());
+}
+
+/**
+ * Gets crystallographic symmetry for an object.
+ * @param selection Object/selection name (null-safe).
+ * @param state Object state.
+ * @param out_params Pre-allocated array of 6 floats [a, b, c, alpha, beta, gamma].
+ * @param out_sgroup Optional: receives malloc'd space group string; caller must free().
+ * @return 1 on success, 0 on failure.
+ */
+int PyMOLWasm_GetSymmetry(CPyMOL* pymolPtr, const char* selection, int state,
+                           float* out_params, char** out_sgroup) {
+    if (!pymolPtr || !out_params) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    float a, b, c, alpha, beta, gamma;
+    char sgroup[64] = {};
+    auto result = ExecutiveGetSymmetry(G, safe_str(selection), state,
+                                        &a, &b, &c, &alpha, &beta, &gamma, sgroup);
+    if (!result || !result.result()) return 0;
+
+    out_params[0] = a; out_params[1] = b; out_params[2] = c;
+    out_params[3] = alpha; out_params[4] = beta; out_params[5] = gamma;
+
+    if (out_sgroup) {
+        size_t len = strlen(sgroup);
+        char* buf = static_cast<char*>(malloc(len + 1));
+        if (buf) {
+            std::memcpy(buf, sgroup, len + 1);
+            *out_sgroup = buf;
+        }
+    }
+    return 1;
+}
+
+/**
+ * Gets the RGB color values for a named color.
+ * @param color_name Color name, e.g. "red", "blue" (must be non-null).
+ * @param out_rgb Pre-allocated array of 3 floats [R, G, B] in 0-1 range.
+ * @return 1 on success, 0 on failure.
+ */
+int PyMOLWasm_GetColorTuple(CPyMOL* pymolPtr, const char* color_name,
+                              float* out_rgb) {
+    if (!pymolPtr || !color_name || !out_rgb) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    int idx = ColorGetIndex(G, color_name);
+    if (idx < 0) return 0;
+    const float* rgb = ColorGet(G, idx);
+    if (!rgb) return 0;
+    out_rgb[0] = rgb[0]; out_rgb[1] = rgb[1]; out_rgb[2] = rgb[2];
+    return 1;
+}
+
+/**
+ * Gets the 4x4 transformation matrix for an object.
+ * @param name Object name (must be non-null).
+ * @param state Object state.
+ * @param out_matrix Pre-allocated array of 16 doubles.
+ * @return 1 on success, 0 on failure.
+ */
+int PyMOLWasm_GetObjectMatrix(CPyMOL* pymolPtr, const char* name, int state,
+                               double* out_matrix) {
+    if (!pymolPtr || !name || !out_matrix) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    double* matrix = nullptr;
+    int ok = ExecutiveGetObjectMatrix(G, name, state, &matrix, 1);
+    if (!ok || !matrix) return 0;
+    std::memcpy(out_matrix, matrix, 16 * sizeof(double));
+    return 1;
+}
+
+/**
+ * Gets the title string for an object state.
+ * @param name Object name (must be non-null).
+ * @param state State index (0-based).
+ * @param out_ptr Receives malloc'd title string; caller must free().
+ * @return Length of the title string, or 0 on failure.
+ */
+int PyMOLWasm_GetTitle(CPyMOL* pymolPtr, const char* name, int state,
+                        char** out_ptr) {
+    if (!pymolPtr || !name || !out_ptr) return 0;
+    *out_ptr = nullptr;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    const char* title = ExecutiveGetTitle(G, name, state);
+    if (!title) return 0;
+
+    return alloc_output_string(title, out_ptr);
 }
 
 } // extern "C"
