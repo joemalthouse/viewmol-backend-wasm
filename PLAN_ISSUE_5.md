@@ -35,11 +35,12 @@ For "ALA 123": 1 LabelRun → ~300 bytes of JSON. **94-95% reduction.**
 
 ## Files Modified
 
-1. `pymol-open-source/layer1/Ray.h` — add `LabelRun` struct + `label_runs` vector to `_CRay`
+1. `pymol-open-source/layer1/Ray.h` — add `LabelRun` struct + `label_runs` vector + `current_label_run` to `_CRay`
 2. `pymol-open-source/layer1/Ray.cpp` — add `beginLabelRun()`, `labelRunChar()`, `endLabelRun()` methods
-3. `pymol-open-source/layer1/FontGLUT.cpp` — bracket the character loop with begin/end calls
-4. `pymol-open-source/layer1/RayBackend.cpp` — serialize `label_runs` in `serializeScenePacketJSON()`
-5. `pymol-open-source/layer1/RayBackend.h` — add `label_runs` to `ScenePacket` struct
+3. `pymol-open-source/layer1/FontGLUT.cpp` — single `if` guard: `character()` vs `labelRunChar()`
+4. `pymol-open-source/layer2/RepLabel.cpp` — bracket per-label loop with `beginLabelRun`/`endLabelRun`
+5. `pymol-open-source/layer1/RayBackend.cpp` — serialize `label_runs` in `serializeScenePacketJSON()`
+6. `pymol-open-source/layer1/RayBackend.h` — add `label_runs` to `ScenePacket` struct
 
 ## Implementation
 
@@ -71,89 +72,119 @@ LabelRun* current_label_run = nullptr;  // non-null while accumulating
 ### Step 2: Add accumulation methods to CRay (Ray.cpp)
 
 ```cpp
-void CRay::beginLabelRun(const float* origin, const float* normal,
-                          const float* x_axis, const float* y_axis,
-                          float scale, const float* color, float trans,
-                          int font_id) {
+void CRay::beginLabelRun(int font_id) {
     label_runs.emplace_back();
     current_label_run = &label_runs.back();
-    copy3f(origin, current_label_run->origin);
-    copy3f(normal, current_label_run->normal);
-    copy3f(x_axis, current_label_run->x_axis);
-    copy3f(y_axis, current_label_run->y_axis);
-    current_label_run->scale = scale;
-    copy3f(color, current_label_run->color);
-    current_label_run->trans = trans;
+    // Capture rendering context at label start
+    float* v = TextGetPos(G);
+    copy3f(v, current_label_run->origin);
+    if (TTTFlag) {
+        transformTTT44f3f(glm::value_ptr(TTT), current_label_run->origin,
+                          current_label_run->origin);
+    }
+    current_label_run->v_scale =
+        RayGetScreenVertexScale(this, current_label_run->origin) / Sampling;
+    RayApplyContextToVertex(this, current_label_run->origin);
+
+    // Screen-aligned axes (same computation as character())
+    float xn[3] = {1,0,0}, yn[3] = {0,1,0}, zn[3] = {0,0,1};
+    RayApplyMatrixInverse33(1, (float3*)xn, glm::value_ptr(Rotation), (float3*)xn);
+    RayApplyMatrixInverse33(1, (float3*)yn, glm::value_ptr(Rotation), (float3*)yn);
+    RayApplyMatrixInverse33(1, (float3*)zn, glm::value_ptr(Rotation), (float3*)zn);
+    copy3f(xn, current_label_run->x_axis);
+    copy3f(yn, current_label_run->y_axis);
+    copy3f(zn, current_label_run->normal);
+
+    current_label_run->trans = Trans;
+    copy3f(IntColor, current_label_run->color);
     current_label_run->font_id = font_id;
 }
 
 void CRay::labelRunChar(int char_id) {
     if (current_label_run) {
         current_label_run->char_ids.push_back(char_id);
+        // Still advance the text cursor (needed for multi-line labels and
+        // for RepLabelRenderRayBackground which reads TextGetPos after rendering)
+        float xorig, yorig, advance;
+        int w, h;
+        CharacterGetGeometry(G, char_id, &w, &h, &xorig, &yorig, &advance);
+        float vt[3];
+        float scale = current_label_run->v_scale * advance;
+        scale3f(current_label_run->x_axis, scale, vt);
+        float* v = TextGetPos(G);
+        add3f(v, vt, vt);
+        TextSetPos(G, vt);
     } else {
-        // Fallback: no active run, emit as individual primitive (backward compat)
-        character(char_id);
+        character(char_id);  // fallback to per-glyph primitives
     }
 }
 
 void CRay::endLabelRun() {
+    if (current_label_run && current_label_run->char_ids.empty()) {
+        label_runs.pop_back();  // discard empty runs
+    }
     current_label_run = nullptr;
 }
 ```
 
-### Step 3: Modify FontGLUT.cpp to use label runs
+### Step 3: Bracket at RepLabelRenderRay level (NOT FontGLUT)
 
-In `CFontGLUT::RenderRay()` (FontGLUT.cpp:416-436), the current code is:
+The natural label boundary is in `RepLabelRenderRay()` (RepLabel.cpp:1228-1288), which loops over labels and calls `TextRenderRay()` for each one. **This is the proper place** — `FontGLUT::RenderRay` is a generic text renderer that shouldn't know about label batching.
 
+In `RepLabelRenderRay()`, the per-label loop currently looks like:
 ```cpp
-while ((c = *(st++))) {
-    if ((c >= first) && (c < last)) {
-        ch = font_info->ch[c - first];
-        if (ch) {
-            int id = CharacterFind(G, &fprnt);
-            if (!id)
-                id = CharacterNewFromBitmap(G, ...);
-            if (id)
-                ray->character(id);
+for (int c = 0; c < I->N; c++) {
+    auto& l = I->L[c];
+    if (l) {
+        TextSetPosNColor(G, tCenter, I->labelV[c].color);
+        TextRenderRay(G, ray, font_id, st, font_size, I->labelV[c].position,
+            (draw_var ? 1 : 0), I->labelV[c].getRelativeMode());
+        if (draw_var) {
+            RepLabelRenderRayBackground(I, info, I->labelV[c].color, draw_var);
         }
     }
 }
 ```
 
 Change to:
-
 ```cpp
-// Capture label context before the loop
-float label_origin[3], label_normal[3], label_x_axis[3], label_y_axis[3];
-float label_scale, label_color[3], label_trans;
-// These are available from the TextRenderRay context:
-//   ray->TextPos (current text position)
-//   ray->Wobble, ray->Trans, etc.
-copy3f(ray->TextPos, label_origin);
-// normal, x_axis, y_axis come from the screen-aligned basis vectors
-// scale comes from the character sizing in TextRenderRay
-// color comes from the current text color
-
-ray->beginLabelRun(label_origin, label_normal, label_x_axis, label_y_axis,
-                    label_scale, label_color, label_trans, I->Font.TextID);
-
-while ((c = *(st++))) {
-    if ((c >= first) && (c < last)) {
-        ch = font_info->ch[c - first];
-        if (ch) {
-            int id = CharacterFind(G, &fprnt);
-            if (!id)
-                id = CharacterNewFromBitmap(G, ...);
-            if (id)
-                ray->labelRunChar(id);
+for (int c = 0; c < I->N; c++) {
+    auto& l = I->L[c];
+    if (l) {
+        TextSetPosNColor(G, tCenter, I->labelV[c].color);
+        ray->beginLabelRun(font_id);                          // NEW
+        TextRenderRay(G, ray, font_id, st, font_size, I->labelV[c].position,
+            (draw_var ? 1 : 0), I->labelV[c].getRelativeMode());
+        ray->endLabelRun();                                    // NEW
+        if (draw_var) {
+            RepLabelRenderRayBackground(I, info, I->labelV[c].color, draw_var);
         }
     }
 }
-
-ray->endLabelRun();
 ```
 
-**Critical detail:** The origin, normal, axes, and scale must be extracted from the rendering context at the start of each label string. `TextRenderRay()` in `Text.cpp` sets up these values before calling `FontGLUT::RenderRay()`. Need to trace exactly which variables hold: (a) the 3D position of the label anchor, (b) the screen-aligned basis vectors, (c) the text scale factor, (d) the current color.
+**Why this is better than bracketing in FontGLUT:**
+- `RepLabelRenderRay` owns the per-label iteration — it knows label boundaries
+- `FontGLUT::RenderRay` is generic text rendering — it renders any string, not just labels
+- Distance/angle labels (`RepDistDash`, `RepAngle`) also call `TextRenderRay` — they could optionally benefit too without changing `FontGLUT`
+- `beginLabelRun` captures `TextGetPos()` which was just set by `TextSetPosNColor()` — guaranteed correct
+
+**Inside FontGLUT::RenderRay, `ray->character(id)` is replaced with `ray->labelRunChar(id)`:**
+```cpp
+// In FontGLUT.cpp, change:
+    ray->character(id);
+// To:
+    if (ray->current_label_run)
+        ray->labelRunChar(id);
+    else
+        ray->character(id);
+```
+
+This is the **only change** to FontGLUT — a single `if` statement. The batching logic lives entirely in `CRay` and `RepLabel`.
+
+### Step 3b: Add `#include "RepLabel.h"` if needed
+
+`RepLabel.cpp` already includes `Ray.h` (for `CRay`), so `beginLabelRun`/`endLabelRun` are accessible.
 
 ### Step 4: Serialize label_runs in RayBackend.cpp
 
@@ -216,13 +247,13 @@ The GPU renderer (TypeScript/WebGPU) must be updated to:
 
 This is the most complex part but lives outside the C++ codebase.
 
-## Open Questions to Resolve During Implementation
+## Resolved Design Questions
 
-1. **Where are the screen-aligned axes computed?** `TextRenderRay()` in `Text.cpp` sets up 3D text positioning. Need to trace how `ray->TextPos`, screen-right, and screen-up are established per label.
+1. **Screen-aligned axes:** Computed in `CRay::beginLabelRun()` using the same `RayApplyMatrixInverse33` code from `CRay::character()`. Extracted from `CRay::Rotation` matrix.
 
-2. **Does `CFontGLUT::RenderRay()` advance `ray->TextPos` as it renders?** If so, `beginLabelRun` captures the *starting* position, and per-glyph advances are derivable from `char_metrics.advance`. This needs verification.
+2. **Text cursor advancement:** `labelRunChar()` advances `TextGetPos()` using `CharacterGetGeometry` for `advance` — same math as `character()` but without creating primitives. This is critical because `RepLabelRenderRayBackground` reads `TextGetPos()` after rendering to compute background dimensions.
 
-3. **Are there non-label uses of `CFontGLUT::RenderRay()`?** If other subsystems (e.g., distance labels, angle labels) also use this path, they should also benefit from batching.
+3. **Non-label uses of FontGLUT:** Distance labels, angle labels, and dihedral labels also use `TextRenderRay`. They could benefit from batching too. The `if (ray->current_label_run)` guard in FontGLUT means they still work via the old `character()` path unless their `Rep*` classes opt in with `beginLabelRun`/`endLabelRun`.
 
 ## Risk Assessment
 

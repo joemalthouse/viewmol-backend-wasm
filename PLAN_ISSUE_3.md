@@ -33,7 +33,7 @@ int PyMOLWasm_GetStr(CPyMOL* pymolPtr, const char* format,
                                        state, "", -1, -1, true);
     if (!vla) return 0;
 
-    size_t len = VLAGetSize(vla);
+    size_t len = vla.size();
     char* buf = (char*)malloc(len + 1);
     if (!buf) return 0;
     memcpy(buf, vla.data(), len);
