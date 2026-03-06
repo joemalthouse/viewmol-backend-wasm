@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PyMOL WASM + viewmol-ray-tracer Test</title>
+    <style>
+      body { font-family: monospace; background: #1a1a1a; color: #e0e0e0; padding: 20px; }
+      #log { white-space: pre-wrap; font-size: 14px; line-height: 1.5; }
+      canvas { border: 1px solid #444; margin-top: 20px; display: block; }
+      h1 { font-size: 18px; color: #90caf9; }
+    </style>
+  </head>
+  <body>
+    <h1>PyMOL WASM + viewmol-ray-tracer Integration Test</h1>
+    <div id="log"></div>
+    <canvas id="result"></canvas>
+    <!-- Load viewmol-ray-tracer (sets window.ViewMolAPI) -->
+    <script src="/viewmol-ray-tracer.js"></script>
+    <script type="module" src="/src/test-render.ts"></script>
+  </body>
+</html>

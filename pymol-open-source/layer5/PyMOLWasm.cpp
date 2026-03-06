@@ -8,7 +8,12 @@
 #include "Selector.h"
 #include "Setting.h"
 #include "Scene.h"
+#include "SceneDef.h"
+#include "SceneRay.h"
 #include "SceneView.h"
+#include "Ray.h"
+#include "RayBackend.h"
+#include "Color.h"
 #include "Movie.h"
 #include "MovieScene.h"
 #include "Vector.h"
@@ -84,7 +89,8 @@ int PyMOLWasm_Show(CPyMOL* pymolPtr, const char* rep_name, const char* selection
     int rep_id = rep_name_to_id(rep_name);
     if (rep_id == -1) return 0;
 
-    auto result = ExecutiveSetRepVisib(G, safe_str(selection), rep_id, 1);
+    int repmask = (rep_id == cRepAll) ? cRepBitmask : (1 << rep_id);
+    auto result = ExecutiveSetRepVisMaskFromSele(G, safe_str(selection), repmask, 1);
     return static_cast<bool>(result) ? 1 : 0;
 }
 
@@ -103,16 +109,15 @@ int PyMOLWasm_Hide(CPyMOL* pymolPtr, const char* rep_name, const char* selection
 
     // Special case: hide all representations
     if (strcmp(rep_name, "everything") == 0) {
-        for (int i = 0; i < cRepCnt; i++) {
-            ExecutiveSetRepVisib(G, sel, i, 0);
-        }
-        return 1;
+        auto result = ExecutiveSetRepVisMaskFromSele(G, sel, cRepBitmask, 0);
+        return static_cast<bool>(result) ? 1 : 0;
     }
 
     int rep_id = rep_name_to_id(rep_name);
     if (rep_id == -1) return 0;
 
-    auto result = ExecutiveSetRepVisib(G, sel, rep_id, 0);
+    int repmask = (rep_id == cRepAll) ? cRepBitmask : (1 << rep_id);
+    auto result = ExecutiveSetRepVisMaskFromSele(G, sel, repmask, 0);
     return static_cast<bool>(result) ? 1 : 0;
 }
 
@@ -226,6 +231,24 @@ int PyMOLWasm_SetSetting(CPyMOL* pymolPtr, int setting_index, float value) {
 }
 
 /**
+ * Sets a per-object/selection setting.
+ * @param setting_index Setting index from SettingInfo.h.
+ * @param value Numeric value (float or int cast to float).
+ * @param selection Selection or object name to apply the setting to.
+ * @return 1 on success, 0 on failure.
+ */
+int PyMOLWasm_SetSettingForSelection(CPyMOL* pymolPtr, int setting_index, float value, const char* selection) {
+    if (!pymolPtr || !selection || !selection[0]) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    char value_str[64];
+    snprintf(value_str, sizeof(value_str), "%g", value);
+    return ExecutiveSetSettingFromString(G, setting_index, value_str,
+                                         selection, -1 /* state */, 1 /* quiet */, 0 /* updates */);
+}
+
+/**
  * Executes a 'color' command.
  * @param color_name Color name (must be non-null).
  * @param selection Selection string (null-safe, defaults to "").
@@ -235,7 +258,7 @@ int PyMOLWasm_Color(CPyMOL* pymolPtr, const char* color_name, const char* select
     PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
     if (!G) return 0;
 
-    auto result = ExecutiveColor(G, safe_str(selection), color_name, 0, 0);
+    auto result = ExecutiveColorFromSele(G, safe_str(selection), color_name, 0, 0);
     return static_cast<bool>(result) ? 1 : 0;
 }
 
@@ -373,6 +396,21 @@ int PyMOLWasm_SetView(CPyMOL* pymolPtr, const float* in_view) {
         view[i] = in_view[i];
     }
     SceneSetView(G, view, true, 0.0f, 0);
+    return 1;
+}
+
+/**
+ * Rotates the scene view around the specified axis.
+ * Equivalent to PyMOL's `turn axis, angle` command.
+ * @param axis 'x', 'y', or 'z'.
+ * @param angle Angle in degrees.
+ */
+int PyMOLWasm_Turn(CPyMOL* pymolPtr, char axis, float angle) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    SceneRotateAxis(G, angle, axis);
     return 1;
 }
 
@@ -604,16 +642,90 @@ int PyMOLWasm_MapNew(CPyMOL* pymolPtr, const char* name, int type, float grid_sp
 }
 
 /**
+ * Palette lookup table — maps palette names to (prefix, digits, first, last).
+ * Derived from pymol/constants_palette.py. Used by PyMOLWasm_Spectrum to call
+ * ExecutiveSpectrum directly (PyMOL_Spectrum is behind _PYMOL_LIB guard).
+ */
+struct PaletteEntry {
+    const char* name;
+    const char* prefix;
+    int digits;
+    int first;
+    int last;
+};
+
+static const PaletteEntry palette_table[] = {
+    {"rainbow_cycle",       "o", 3,   0, 999},
+    {"rainbow_cycle_rev",   "o", 3, 999,   0},
+    {"rainbow",             "o", 3, 107, 893},
+    {"rainbow_rev",         "o", 3, 893, 107},
+    {"rainbow2",            "s", 3, 167, 833},
+    {"rainbow2_rev",        "s", 3, 833, 167},
+    {"gcbmry",              "r", 3, 166, 999},
+    {"yrmbcg",              "r", 3, 999, 166},
+    {"cbmr",                "r", 3, 166, 833},
+    {"rmbc",                "r", 3, 833, 166},
+    {"green_yellow_red",    "s", 3, 500, 833},
+    {"blue_white_red",      "w", 3,  83, 167},
+    {"red_white_blue",      "w", 3, 167,  83},
+    {"blue_white_magenta",  "w", 3, 167, 500},
+    {"magenta_white_blue",  "w", 3, 500, 167},
+    {"red_white_green",     "w", 3, 833, 333},
+    {"green_white_red",     "w", 3, 333, 833},
+    {"blue_green",          "w", 3, 167, 333},
+    {"green_blue",          "w", 3, 333, 167},
+    {"yellow_cyan_white",   "s", 3, 333, 167},
+    {"yellow_white_green",  "w", 3, 500, 333},
+    {"green_white_yellow",  "w", 3, 333, 500},
+    {"white_green_yellow",  "w", 3,   1, 500},
+    {"white_magenta_green", "w", 3,   1, 333},
+    {"green_white_magenta", "w", 3, 333,   1},
+    {"white_yellow_green",  "w", 3,   1, 667},
+    {"green_yellow_white",  "w", 3, 667,   1},
+    {nullptr, nullptr, 0, 0, 0}  // sentinel
+};
+
+/**
  * Applies a color spectrum to a selection based on an expression.
  * @param selection Selection string (null-safe).
- * @param expression Expression to color by, e.g. "b" for b-factors (null-safe).
+ * @param expression Expression to color by, e.g. "b" for b-factors, "count" for rainbow (null-safe).
+ * @param palette Palette name, e.g. "rainbow", "red_white_blue" (null-safe, defaults to "rainbow").
  */
-int PyMOLWasm_Spectrum(CPyMOL* pymolPtr, const char* selection, const char* expression, float min_val, float max_val) {
+int PyMOLWasm_Spectrum(CPyMOL* pymolPtr, const char* selection, const char* expression, const char* palette, float min_val, float max_val) {
     if (!pymolPtr) return 0;
     PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
-    if (!G) return 0;
 
-    auto result = ExecutiveSpectrum(G, safe_str(selection), safe_str(expression), min_val, max_val, 0, -1, "", 0, 0, 1);
+    const char* pal = (palette && palette[0]) ? palette : "rainbow";
+
+    // Look up palette in static table
+    const char* prefix = "o";
+    int digits = 3;
+    int first = 107;
+    int last = 893;
+
+    for (const auto& entry : palette_table) {
+        if (!entry.name) break;
+        if (strcmp(entry.name, pal) == 0) {
+            prefix = entry.prefix;
+            digits = entry.digits;
+            first = entry.first;
+            last = entry.last;
+            break;
+        }
+    }
+
+    // Match native PyMOL behavior: when min==0 and max==0 (unspecified),
+    // pass max=-1 so ExecutiveSpectrum auto-detects the range (it triggers
+    // auto-detect when max < min).
+    float eff_min = min_val;
+    float eff_max = max_val;
+    if (eff_min == 0.0f && eff_max == 0.0f) {
+        eff_max = -1.0f;
+    }
+
+    auto result = ExecutiveSpectrum(G, safe_str(selection), safe_str(expression),
+                                    eff_min, eff_max, first, last, prefix, digits,
+                                    0 /* byres */, 1 /* quiet */);
     return static_cast<bool>(result) ? 1 : 0;
 }
 
@@ -826,6 +938,225 @@ int PyMOLWasm_SetAtomCoordinates(CPyMOL* pymolPtr, const char* selection, int st
     }
 
     return set_count;
+}
+
+/**
+ * Extracts the ray scene as a JSON string for external GPU ray tracing.
+ * Replicates SceneRay()'s primitive collection pipeline, then serialises
+ * the CRay data via RayBackend into viewmol-ray-v2 JSON.
+ *
+ * @param width Ray image width (0 = use scene width).
+ * @param height Ray image height (0 = use scene height).
+ * @param out_ptr Pointer to a char* that will receive the malloc'd JSON buffer.
+ *                Caller must free() this buffer when done.
+ * @return Length of JSON (excluding null terminator), or 0 on failure.
+ */
+int PyMOLWasm_GetRayScene(CPyMOL* pymolPtr, int width, int height, char** out_ptr, int /*unused*/) {
+    if (!pymolPtr || !out_ptr) return 0;
+    *out_ptr = nullptr;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+#ifdef _PYMOL_NO_RAY
+    return 0;
+#endif
+
+    CScene *I = G->Scene;
+    if (!I) return 0;
+
+    // Set scene dimensions to match ray output (equivalent to cmd.viewport)
+    // This ensures pixel_scale_value calculations match native PyMOL
+    if (width > 0 && height > 0) {
+        I->Width = width;
+        I->Height = height;
+    }
+
+    // Update scene state
+    SceneUpdate(G, false);
+
+    // Determine dimensions
+    int ray_width = width > 0 ? width : I->Width;
+    int ray_height = height > 0 ? height : I->Height;
+    if (ray_width <= 0 || ray_height <= 0) return 0;
+
+    float fov = SettingGetGlobal_f(G, cSetting_field_of_view);
+    int ortho = SettingGetGlobal_i(G, cSetting_ray_orthoscopic);
+    if (ortho < 0)
+        ortho = SettingGetGlobal_b(G, cSetting_ortho);
+
+    float aspRat = ((float) ray_width) / ((float) ray_height);
+
+    // Seed RNG for deterministic random table (matches native PyMOL headless)
+    srand(0);
+
+    // Create ray object
+    CRay* ray = RayNew(G, 0); // no antialiasing for scene export
+    if (!ray) return 0;
+
+    // Set up view matrix (non-stereo)
+    float rayView[16];
+    float angle = 0.0f;
+    SceneRaySetRayView(G, I, 0, rayView, &angle, 0.0f);
+
+    // Compute viewing volume and call RayPrepare
+    float view_height = (float)(fabs(I->m_view.pos().z) * tan((fov / 2.0) * cPI / 180.0));
+    float view_width = view_height * aspRat;
+
+    float pixel_scale_value = SettingGetGlobal_f(G, cSetting_ray_pixel_scale);
+    if (pixel_scale_value < 0)
+        pixel_scale_value = 1.0f;
+    pixel_scale_value *= ((float) ray_height) / I->Height;
+
+    if (ortho) {
+        const float _1 = 1.0f;
+        RayPrepare(ray, -view_width, view_width, -view_height, view_height,
+                   I->m_view.m_clipSafe().m_front, I->m_view.m_clipSafe().m_back,
+                   fov, I->m_view.pos(), rayView, I->m_view.rotMatrix(),
+                   aspRat, ray_width, ray_height,
+                   pixel_scale_value, ortho, _1, _1,
+                   ((float) ray_height) / I->Height);
+    } else {
+        float pos_z = I->m_view.pos().z;
+        if ((-pos_z) < I->m_view.m_clipSafe().m_front)
+            pos_z = -I->m_view.m_clipSafe().m_front;
+
+        float back_ratio = -I->m_view.m_clipSafe().m_back / pos_z;
+        float back_height = back_ratio * view_height;
+        float back_width = aspRat * back_height;
+        RayPrepare(ray,
+                   -back_width, back_width, -back_height, back_height,
+                   I->m_view.m_clipSafe().m_front, I->m_view.m_clipSafe().m_back,
+                   fov, I->m_view.pos(), rayView, I->m_view.rotMatrix(),
+                   aspRat, ray_width, ray_height,
+                   pixel_scale_value, ortho,
+                   view_height / back_height,
+                   I->m_view.m_clipSafe().m_front / I->m_view.m_clipSafe().m_back,
+                   ((float) ray_height) / I->Height);
+    }
+
+    // Collect primitives from all objects
+    {
+        auto slot_vla = I->m_slots.data();
+        RenderInfo info;
+        info.ray = ray;
+        info.ortho = ortho;
+        info.vertex_scale = SceneGetScreenVertexScale(G, nullptr);
+        info.use_shaders = SettingGetGlobal_b(G, cSetting_use_shaders);
+
+        if (SettingGetGlobal_b(G, cSetting_dynamic_width)) {
+            info.dynamic_width = true;
+            info.dynamic_width_factor = SettingGetGlobal_f(G, cSetting_dynamic_width_factor);
+            info.dynamic_width_min = SettingGetGlobal_f(G, cSetting_dynamic_width_min);
+            info.dynamic_width_max = SettingGetGlobal_f(G, cSetting_dynamic_width_max);
+        }
+
+        for (auto* obj : I->Obj) {
+            if (obj->type != cObjectGroup) {
+                if (SceneGetDrawFlag(&I->grid, slot_vla, obj->grid_slot)) {
+                    float color[3];
+                    ColorGetEncoded(G, obj->Color, color);
+                    RaySetContext(ray, obj->getRenderContext());
+                    ray->color3fv(color);
+
+                    auto icx = SettingGetWD<int>(
+                        obj->Setting.get(), cSetting_ray_interior_color, cColorDefault);
+
+                    if (icx == cColorDefault) {
+                        ray->interiorColor3fv(color, true);
+                    } else if (icx == cColorObject) {
+                        ray->interiorColor3fv(color, false);
+                    } else {
+                        float icolor[3];
+                        ColorGetEncoded(G, icx, icolor);
+                        ray->interiorColor3fv(icolor, false);
+                    }
+
+                    info.state = ObjectGetCurrentState(obj, false);
+                    obj->render(&info);
+                }
+            }
+        }
+    }
+
+    // Build and serialize scene packet
+    auto packet = pymol::ray::buildScenePacket(ray);
+    std::string json = pymol::ray::serializeScenePacketJSON(packet);
+
+    RayFree(ray);
+
+    int json_len = static_cast<int>(json.size());
+
+    // Allocate output buffer via malloc (caller frees)
+    char* buf = static_cast<char*>(malloc(json_len + 1));
+    if (!buf) return 0;
+
+    std::memcpy(buf, json.c_str(), json_len + 1);
+    *out_ptr = buf;
+    return json_len;
+}
+
+/**
+ * Labels atoms matching a selection with an expression.
+ * Uses the alternate (non-Python) expression evaluator, supporting
+ * properties: name, resn, resi, resv, chain, alt, elem, type, q, b,
+ * segi, ID, rank, index, model, and literal strings in quotes.
+ *
+ * @param selection  Atom selection expression (e.g., "all", "name CA").
+ * @param expression Label expression (e.g., "name", "resn+resi").
+ * @return 1 on success, 0 on failure.
+ */
+int PyMOLWasm_Label(CPyMOL* pymolPtr, const char* selection, const char* expression) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    const char* sel = safe_str(selection);
+    const char* expr = expression ? expression : "";
+
+    auto result = ExecutiveLabel(G, sel, expr, 1, cExecutiveLabelEvalAlt);
+    return static_cast<bool>(result) ? 1 : 0;
+}
+
+/**
+ * Sets a setting using a string value, supporting color names (e.g. "red"),
+ * on/off toggles, and other non-numeric setting values.
+ *
+ * @param setting_index  PyMOL setting index.
+ * @param value          String value (e.g. "red", "on", "off").
+ * @param selection      Optional selection/object name. Empty string for global.
+ * @return 1 on success, 0 on failure.
+ */
+int PyMOLWasm_SetSettingString(CPyMOL* pymolPtr, int setting_index,
+                               const char* value, const char* selection) {
+    if (!pymolPtr || !value) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    const char* sel = selection ? selection : "";
+    return ExecutiveSetSettingFromString(G, setting_index, value, sel, -1, 1, 1);
+}
+
+/**
+ * Creates a distance measurement object between two selections.
+ *
+ * @param name     Name for the distance object.
+ * @param sel1     First selection.
+ * @param sel2     Second selection.
+ * @param mode     Distance mode (0=all pairs, 1=min, etc.).
+ * @return 1 on success, 0 on failure.
+ */
+int PyMOLWasm_Distance(CPyMOL* pymolPtr, const char* name,
+                       const char* sel1, const char* sel2, int mode) {
+    if (!pymolPtr) return 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+    const char* nm = safe_str(name);
+    const char* s1 = safe_str(sel1);
+    const char* s2 = safe_str(sel2);
+
+    auto result = ExecutiveDistance(G, nm, s1, s2, mode, -1.0f, 1, 1, 0, -1, 0);
+    return static_cast<bool>(result) ? 1 : 0;
 }
 
 } // extern "C"

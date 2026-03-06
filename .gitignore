@@ -15,3 +15,14 @@ pymol-open-source/cmake_install.cmake
 # WASM build output
 pymol-open-source/pymol_wasm.js
 pymol-open-source/pymol_wasm.wasm
+
+# Out-of-source build directory
+pymol-open-source/build/
+
+# Test artifacts
+artifacts/
+
+# Temp/debug scripts
+check-colors.py
+check-module.cjs
+test_label_debug.ts

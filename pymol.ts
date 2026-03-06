@@ -22,6 +22,7 @@ export interface PyMOLModule extends EmscriptenModuleBase {
 
     // Emscripten helpers
     stringToNewUTF8(str: string): number;
+    UTF8ToString(ptr: number): string;
 
     // Memory management
     _malloc(size: number): number;
@@ -50,6 +51,7 @@ export interface PyMOLModule extends EmscriptenModuleBase {
     _PyMOLWasm_Zoom(pymolPtr: number, selection: number, buffer: number): number;
     _PyMOLWasm_Center(pymolPtr: number, selection: number): number;
     _PyMOLWasm_Origin(pymolPtr: number, selection: number): number;
+    _PyMOLWasm_Turn(pymolPtr: number, axis: number, angle: number): number;
 
     // Object management
     _PyMOLWasm_Delete(pymolPtr: number, name: number): number;
@@ -68,6 +70,14 @@ export interface PyMOLModule extends EmscriptenModuleBase {
 
     // Settings
     _PyMOLWasm_SetSetting(pymolPtr: number, settingIndex: number, value: number): number;
+    _PyMOLWasm_SetSettingForSelection(pymolPtr: number, settingIndex: number, value: number, selection: number): number;
+    _PyMOLWasm_SetSettingString(pymolPtr: number, settingIndex: number, value: number, selection: number): number;
+
+    // Labels
+    _PyMOLWasm_Label(pymolPtr: number, selection: number, expression: number): number;
+
+    // Measurements
+    _PyMOLWasm_Distance(pymolPtr: number, name: number, sel1: number, sel2: number, mode: number): number;
 
     // View matrix
     _PyMOLWasm_GetView(pymolPtr: number, outView: number): number;
@@ -95,7 +105,7 @@ export interface PyMOLModule extends EmscriptenModuleBase {
     _PyMOLWasm_Isomesh(pymolPtr: number, meshName: number, mapName: number, level: number, selection: number, buffer: number, state: number, carve: number, meshMode: number): number;
 
     // Coloring
-    _PyMOLWasm_Spectrum(pymolPtr: number, selection: number, expression: number, minVal: number, maxVal: number): number;
+    _PyMOLWasm_Spectrum(pymolPtr: number, selection: number, expression: number, palette: number, minVal: number, maxVal: number): number;
     _PyMOLWasm_RampNew(pymolPtr: number, name: number, mapName: number, range: number, rangeSize: number, colors: number): number;
 
     // Scenes
@@ -120,6 +130,12 @@ export interface PyMOLModule extends EmscriptenModuleBase {
 
     // Coordinates
     _PyMOLWasm_SetAtomCoordinates(pymolPtr: number, selection: number, state: number, inBuffer: number, bufferSize: number): number;
+
+    // Ray scene export (out_ptr is a pointer to a char* that receives a malloc'd buffer)
+    _PyMOLWasm_GetRayScene(pymolPtr: number, width: number, height: number, outPtr: number, unused: number): number;
+
+    // Emscripten HEAP32 view for reading pointers
+    HEAP32: Int32Array;
 }
 
 /** PDB string load format constant (cLoadTypePDBStr) */
@@ -384,6 +400,15 @@ export class PyMOLHeadless {
     }
 
     /**
+     * Rotates the view around an axis. Equivalent to `turn axis, angle`.
+     */
+    turn(axis: 'x' | 'y' | 'z', angle: number): boolean {
+        const m = this.getModule();
+        const p = this.getInstancePtr();
+        return m._PyMOLWasm_Turn(p, axis.charCodeAt(0), angle) === 1;
+    }
+
+    /**
      * Sets the origin to a selection.
      */
     origin(selection: string = "all"): boolean {
@@ -576,11 +601,113 @@ export class PyMOLHeadless {
     }
 
     /**
-     * Sets a global setting by index.
+     * Sets a global setting by index, or a per-object setting if selection is provided.
      */
-    setSetting(settingIndex: number, value: number): boolean {
+    setSetting(settingIndex: number, value: number, selection?: string): boolean {
         const m = this.getModule();
-        return m._PyMOLWasm_SetSetting(this.getInstancePtr(), settingIndex, value) === 1;
+        const p = this.getInstancePtr();
+        if (selection) {
+            const selPtr = allocString(m, selection);
+            try {
+                return m._PyMOLWasm_SetSettingForSelection(p, settingIndex, value, selPtr) === 1;
+            } finally {
+                m._free(selPtr);
+            }
+        }
+        return m._PyMOLWasm_SetSetting(p, settingIndex, value) === 1;
+    }
+
+    /**
+     * Sets a setting using a string value, supporting color names (e.g. "red"),
+     * on/off toggles, and other non-numeric setting values.
+     */
+    setSettingString(settingIndex: number, value: string, selection?: string): boolean {
+        const m = this.getModule();
+        const p = this.getInstancePtr();
+        const valPtr = allocString(m, value);
+        const selPtr = allocString(m, selection || '');
+        try {
+            return m._PyMOLWasm_SetSettingString(p, settingIndex, valPtr, selPtr) === 1;
+        } finally {
+            m._free(selPtr);
+            m._free(valPtr);
+        }
+    }
+
+    /**
+     * Labels atoms matching a selection with an expression.
+     * Uses the alternate (non-Python) expression evaluator supporting:
+     * name, resn, resi, resv, chain, alt, elem, type, q, b, segi, ID, rank, index, model.
+     */
+    label(selection: string, expression: string): boolean {
+        const m = this.getModule();
+        const p = this.getInstancePtr();
+        const selPtr = allocString(m, selection);
+        const exprPtr = allocString(m, expression);
+        try {
+            return m._PyMOLWasm_Label(p, selPtr, exprPtr) === 1;
+        } finally {
+            m._free(exprPtr);
+            m._free(selPtr);
+        }
+    }
+
+    /**
+     * Creates a distance measurement object between two selections.
+     */
+    distance(name: string, sel1: string, sel2: string, mode: number = 0): boolean {
+        const m = this.getModule();
+        const p = this.getInstancePtr();
+        const namePtr = allocString(m, name);
+        const s1Ptr = allocString(m, sel1);
+        const s2Ptr = allocString(m, sel2);
+        try {
+            return m._PyMOLWasm_Distance(p, namePtr, s1Ptr, s2Ptr, mode) === 1;
+        } finally {
+            m._free(s2Ptr);
+            m._free(s1Ptr);
+            m._free(namePtr);
+        }
+    }
+
+    /**
+     * Extracts the ray scene as a JSON string for external GPU ray tracing.
+     * Returns a viewmol-ray-v2 JSON string containing all primitives,
+     * camera parameters, and character bitmaps.
+     *
+     * @param width Ray image width (0 = use scene width).
+     * @param height Ray image height (0 = use scene height).
+     * @returns JSON string with ray scene data.
+     */
+    getRayScene(width: number = 0, height: number = 0): string {
+        const m = this.getModule();
+        const p = this.getInstancePtr();
+
+        // Allocate a pointer-sized slot to receive the output buffer address
+        const outPtrPtr = m._malloc(4);
+        if (outPtrPtr === 0) throw new Error("Failed to allocate pointer slot");
+
+        try {
+            m.HEAP32[outPtrPtr >> 2] = 0;
+            const jsonLen = m._PyMOLWasm_GetRayScene(p, width, height, outPtrPtr, 0);
+
+            if (jsonLen === 0) {
+                throw new Error("GetRayScene failed — no scene data available");
+            }
+
+            const bufPtr = m.HEAP32[outPtrPtr >> 2];
+            if (bufPtr === 0) {
+                throw new Error("GetRayScene returned null buffer");
+            }
+
+            try {
+                return m.UTF8ToString(bufPtr);
+            } finally {
+                m._free(bufPtr);
+            }
+        } finally {
+            m._free(outPtrPtr);
+        }
     }
 
     /**

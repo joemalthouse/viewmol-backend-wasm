@@ -300,6 +300,68 @@ function testScenesAndExtents(module: PyMOLModule, pymolPtr: number) {
     console.log("  Scenes and Extent test passed.");
 }
 
+function testGetRayScene(module: PyMOLModule, pymolPtr: number) {
+    // Reload a fresh molecule for ray scene export
+    withString(module, "ray_test_mol", (objNamePtr) =>
+        withString(module, pdbData, (pdbPtr) =>
+            withString(module, "all", (selPtr) =>
+                withString(module, "spheres", (repPtr) => {
+                    module._PyMOLWasm_Load(pymolPtr, objNamePtr, pdbPtr, pdbByteLength, LOAD_FORMAT_PDB_STR);
+                    module._PyMOLWasm_Show(pymolPtr, repPtr, selPtr);
+                    module._PyMOLWasm_Zoom(pymolPtr, selPtr, 0);
+
+                    // Allocate a 2MB buffer for the JSON output
+                    const bufSize = 2 * 1024 * 1024;
+                    withBuffer(module, bufSize, (bufPtr) => {
+                        const result = module._PyMOLWasm_GetRayScene(pymolPtr, 640, 480, bufPtr, bufSize);
+                        assert.ok(result > 0, `GetRayScene should return positive length, got ${result}`);
+
+                        const jsonStr = module.UTF8ToString(bufPtr);
+                        assert.ok(jsonStr.length > 0, "JSON string should be non-empty");
+
+                        const scene = JSON.parse(jsonStr);
+
+                        // Verify format
+                        assert.strictEqual(scene.format, "viewmol-ray-v2", "Format should be viewmol-ray-v2");
+
+                        // Verify dimensions
+                        assert.strictEqual(scene.width, 640, "Width should be 640");
+                        assert.strictEqual(scene.height, 480, "Height should be 480");
+
+                        // Verify primitives exist
+                        assert.ok(scene.primitive_count > 0, `Should have primitives, got ${scene.primitive_count}`);
+                        assert.ok(Array.isArray(scene.primitives), "Primitives should be an array");
+                        assert.ok(scene.primitives.length > 0, "Primitives array should be non-empty");
+
+                        // Verify stride
+                        assert.strictEqual(scene.primitive_stride, 46, "Primitive stride should be 46");
+
+                        // Verify camera parameters exist
+                        assert.ok(Array.isArray(scene.model_view), "model_view should be an array");
+                        assert.strictEqual(scene.model_view.length, 16, "model_view should have 16 elements");
+                        assert.ok(Array.isArray(scene.volume), "volume should be an array");
+                        assert.strictEqual(scene.volume.length, 6, "volume should have 6 elements");
+                        assert.ok(Array.isArray(scene.pos), "pos should be an array");
+                        assert.strictEqual(scene.pos.length, 3, "pos should have 3 elements");
+                        assert.ok(typeof scene.fov === 'number', "fov should be a number");
+
+                        // Verify wobble/random data
+                        assert.ok(Array.isArray(scene.random_table), "random_table should be an array");
+                        assert.strictEqual(scene.random_table.length, 256, "random_table should have 256 elements");
+
+                        console.log(`  Scene: ${scene.primitive_count} primitives, ${scene.width}x${scene.height}`);
+                        console.log(`  JSON size: ${jsonStr.length} bytes`);
+                    });
+
+                    // Clean up
+                    module._PyMOLWasm_Delete(pymolPtr, objNamePtr);
+                })
+            )
+        )
+    );
+    console.log("  GetRayScene test passed.");
+}
+
 function testFinalSpecializedCommands(module: PyMOLModule, pymolPtr: number) {
     const bytesPerFloat = 4;
 
@@ -403,7 +465,10 @@ async function runTests() {
         console.log("TEST 17: Scenes and Extents");
         testScenesAndExtents(module, pymolPtr);
 
-        console.log("TEST 18: Final Specialized Commands");
+        console.log("TEST 18: GetRayScene");
+        testGetRayScene(module, pymolPtr);
+
+        console.log("TEST 19: Final Specialized Commands");
         testFinalSpecializedCommands(module, pymolPtr);
 
         console.log("\nAll tests completed successfully.");
