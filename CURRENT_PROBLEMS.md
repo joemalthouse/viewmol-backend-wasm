@@ -121,7 +121,7 @@ Confirmed: 4,157 FMA instructions in the native binary. The isosurface pipeline 
 
 On x86_64 hosts, this difference would likely vanish since both paths would use SSE without FMA (unless AVX2+FMA3 is enabled).
 
-Note: The CMakeLists.txt does not set any `-ffp-contract` or `-ffast-math` flags. The FMA differences arise from the compiler's default behavior on ARM64 targets. Only one test case (`wasm_isomesh_carve`) uses `knownPlatformPsnr: 45` to accommodate this.
+Note: The CMakeLists.txt does not set any `-ffp-contract` or `-ffast-math` flags. The FMA differences arise from the compiler's default behavior on ARM64 targets. Only one test case (`wasm_rep_mesh`) uses `knownPlatformPsnr: 45` to accommodate this.
 
 ## 5. No `label_runs` Batching
 

@@ -385,19 +385,25 @@ int PyMOLWasm_GetStr(CPyMOL* pymolPtr, const char* format,
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -s USE_LIBPNG=1 -s USE_FREETYPE=1 -Wno-narrowing")
 ```
 
-**No floating-point flags are set.** No `-ffp-contract`, no `-ffast-math`, no `-fno-fast-math`. The issue is not in WASM's build flags — it's in the **native** PyMOL binary's compilation, where the ARM64 compiler defaults to `-ffp-contract=fast` (allowing FMA fusion).
+**No floating-point flags are set.** No `-ffp-contract`, no `-ffast-math`, no `-fno-fast-math`. No `#pragma STDC FP_CONTRACT`, `#pragma clang fp contract`, or `__attribute__((optnone))` anywhere in the source.
 
-### The Affected Code Path
+The default `-ffp-contract` behavior differs by platform:
+- **Emscripten/WASM (Clang):** defaults to `-ffp-contract=off` — FMA is NOT generated
+- **Apple Clang (native ARM64):** defaults to `-ffp-contract=on` — freely contracts `a*b+c` into `fmadd`
 
-**`IsosurfInterpolate()`** in `layer0/Isosurf.cpp:126-132`:
+This default asymmetry is the root cause.
+
+### Affected Code Paths
+
+#### Primary: `IsosurfInterpolate` (Isosurf.cpp:126-134)
 ```cpp
 static void IsosurfInterpolate(CIsosurf* I, float* v1, float* l1,
                                 float* v2, float* l2, float* pt) {
     float ratio;
-    ratio = (I->Level - *l1) / (*l2 - *l1);   // FMA candidate: Level - l1
+    ratio = (I->Level - *l1) / (*l2 - *l1);   // FMA candidate
     pt[0] = v1[0] + (v2[0] - v1[0]) * ratio;  // FMA candidate: (v2-v1)*ratio + v1
-    pt[1] = v1[1] + (v2[1] - v1[1]) * ratio;  // FMA candidate
-    pt[2] = v1[2] + (v2[2] - v1[2]) * ratio;  // FMA candidate
+    pt[1] = v1[1] + (v2[1] - v1[1]) * ratio;
+    pt[2] = v1[2] + (v2[2] - v1[2]) * ratio;
 }
 ```
 
@@ -405,7 +411,32 @@ The expression `v1[i] + (v2[i] - v1[i]) * ratio` is the classic FMA pattern:
 - **With FMA:** `fma(v2[i] - v1[i], ratio, v1[i])` — one rounding at the end
 - **Without FMA (WASM):** `tmp = (v2[i] - v1[i]) * ratio; result = v1[i] + tmp` — two roundings
 
-This function is called **thousands of times** per isosurface (once per edge intersection in the marching cubes grid). The ~3e-5 per-vertex differences accumulate to visible sub-pixel edge shifts.
+Called from two high-volume sites:
+- **`IsosurfFindActiveEdges`** (~line 1936): triple-nested loop over the entire 3D grid, every active edge
+- **`IsosurfDrawPoints`** (~line 1447): another triple-nested loop, same pattern
+
+14 call sites total in Isosurf.cpp (lines 1459, 1474, 1505, 1521, 1550, 1566, 1954, 1965, 1990, 2001, 2027, 2038).
+
+#### Secondary: `FieldInterpolatef` (Field.cpp:186)
+Trilinear interpolation with 8 weighted `result += product * value` terms — 8 FMA candidates. The accumulated result feeds into `IsosurfInterpolate`'s `*l1`/`*l2` arguments, propagating errors into the `ratio` calculation.
+
+#### Tertiary: `RepMeshNew` Grid Construction (RepMesh.cpp:970-1053)
+```cpp
+point[0] = minE[0] + a * gridSize;  // base + index * stride (FMA candidate)
+point[1] = minE[1] + b * gridSize;
+point[2] = minE[2] + c * gridSize;
+```
+Grid coordinates feed into `diff3f`/`within3f` distance calculations (`dx*dx + dy*dy + dz*dz` — 3 more FMA candidates per call).
+
+#### Also: `RepMeshGetSolventDots` (RepMesh.cpp:1257-1260)
+```cpp
+v[0] = v0[0] + vdw * sp->dot[b][0];  // base + scale * offset (FMA)
+```
+Tight loop over all atoms and sphere dots.
+
+### Error Magnitude
+
+For IEEE 754 float32, each extra rounding introduces up to 0.5 ULP. With coordinate values in the 0-100 angstrom range, that's ~6e-6 per operation. The pipeline compounds: `FieldInterpolatef` (8 FMA sites) → `IsosurfInterpolate` (3 FMA sites) → grid distance checks (3 FMA sites) → observed ~3e-5 per vertex.
 
 ### Where It's Called
 
@@ -417,7 +448,7 @@ Each call interpolates along one grid edge to find where the isosurface crosses.
 
 ### Test Impact
 
-Only **one test case** is affected: `wasm_isomesh_carve` in `tests/wasm-parity-cases.ts:262`:
+Only **one test case** is affected: `wasm_rep_mesh` in `tests/wasm-parity-cases.ts:243` (the `knownPlatformPsnr` is at line 262):
 ```typescript
 knownPlatformPsnr: 45,
 ```
@@ -433,12 +464,14 @@ All other 99 test cases pass at the default 60 dB threshold.
 
 | Approach | Feasibility | Impact |
 |---|---|---|
-| Add `-ffp-contract=off` to WASM build | No effect — WASM doesn't have FMA | None |
-| Add `-ffp-contract=off` to native build | Would fix it if you rebuild native PyMOL | Requires native rebuild |
+| Add `-ffp-contract=off` to WASM build | **No-op** — Emscripten Clang already defaults to off | None |
+| Add `-ffp-contract=off` to native ARM64 build | Would eliminate divergence | Requires native rebuild |
 | Add `#pragma STDC FP_CONTRACT OFF` to Isosurf.cpp | Only affects native build on recompile | Targeted fix |
 | Accept the difference | Current approach | `knownPlatformPsnr: 45` |
 
-**Verdict:** This is inherent to platform differences. The WASM code is correct. The difference only manifests when comparing against an ARM64-compiled native binary. On x86_64 (no FMA by default), both paths would likely match.
+**Safety of `-ffp-contract=off` on native:** It makes results *more* predictable (strict IEEE 754), never less. Slight ARM64 performance reduction (FMA is faster than separate mul+add), but the isosurface pipeline is not the bottleneck. PyMOL upstream does not depend on FMA-contracted results for correctness.
+
+**Verdict:** This is inherent to platform defaults. The WASM code is correct. If the native reference build is under your control, adding `-ffp-contract=off` to it would eliminate the divergence. If not, `knownPlatformPsnr: 45` is the correct accommodation. On x86_64 (no FMA by default), both paths would likely match.
 
 ---
 
