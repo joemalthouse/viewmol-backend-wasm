@@ -19,6 +19,10 @@ pymol-open-source/pymol_wasm.wasm
 # Out-of-source build directory
 pymol-open-source/build/
 
+# Python build artifacts
+pymol-open-source/modules/pymol.egg-info/
+*.egg-info/
+
 # Test artifacts
 artifacts/
 
