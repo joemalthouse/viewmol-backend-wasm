@@ -561,15 +561,16 @@ export class PyMOLHeadless {
     getAngle(sel1: string, sel2: string, sel3: string): number {
         const m = this.getModule();
         const p = this.getInstancePtr();
-        const ptrs: number[] = [];
+        const s1 = allocString(m, sel1);
         try {
-            ptrs.push(allocString(m, sel1));
-            ptrs.push(allocString(m, sel2));
-            ptrs.push(allocString(m, sel3));
-            return m._PyMOLWasm_GetAngle(p, ptrs[0], ptrs[1], ptrs[2]);
-        } finally {
-            for (const ptr of ptrs) m._free(ptr);
-        }
+            const s2 = allocString(m, sel2);
+            try {
+                const s3 = allocString(m, sel3);
+                try {
+                    return m._PyMOLWasm_GetAngle(p, s1, s2, s3);
+                } finally { m._free(s3); }
+            } finally { m._free(s2); }
+        } finally { m._free(s1); }
     }
 
     /**
@@ -578,16 +579,19 @@ export class PyMOLHeadless {
     getDihedral(sel1: string, sel2: string, sel3: string, sel4: string): number {
         const m = this.getModule();
         const p = this.getInstancePtr();
-        const ptrs: number[] = [];
+        const s1 = allocString(m, sel1);
         try {
-            ptrs.push(allocString(m, sel1));
-            ptrs.push(allocString(m, sel2));
-            ptrs.push(allocString(m, sel3));
-            ptrs.push(allocString(m, sel4));
-            return m._PyMOLWasm_GetDihedral(p, ptrs[0], ptrs[1], ptrs[2], ptrs[3]);
-        } finally {
-            for (const ptr of ptrs) m._free(ptr);
-        }
+            const s2 = allocString(m, sel2);
+            try {
+                const s3 = allocString(m, sel3);
+                try {
+                    const s4 = allocString(m, sel4);
+                    try {
+                        return m._PyMOLWasm_GetDihedral(p, s1, s2, s3, s4);
+                    } finally { m._free(s4); }
+                } finally { m._free(s3); }
+            } finally { m._free(s2); }
+        } finally { m._free(s1); }
     }
 
     /**

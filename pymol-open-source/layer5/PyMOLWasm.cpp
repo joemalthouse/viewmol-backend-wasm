@@ -286,7 +286,15 @@ int PyMOLWasm_SetSettingForSelection(CPyMOL* pymolPtr, int setting_index, float 
     if (!G) return 0;
 
     char value_str[64];
-    snprintf(value_str, sizeof(value_str), "%g", value);
+    // Fast path for integer values (common: 0, 1, 2, etc.)
+    if (value == static_cast<float>(static_cast<int>(value)) &&
+        value >= -999999.0f && value <= 999999.0f) {
+        int iv = static_cast<int>(value);
+        int n = std::snprintf(value_str, sizeof(value_str), "%d", iv);
+        (void)n;
+    } else {
+        std::snprintf(value_str, sizeof(value_str), "%g", static_cast<double>(value));
+    }
     return ExecutiveSetSettingFromString(G, setting_index, value_str,
                                          selection, -1 /* state */, 1 /* quiet */, 0 /* updates */);
 }
@@ -1127,15 +1135,7 @@ int PyMOLWasm_GetRayScene(CPyMOL* pymolPtr, int width, int height, char** out_pt
 
     RayFree(ray);
 
-    int json_len = static_cast<int>(json.size());
-
-    // Allocate output buffer via malloc (caller frees)
-    char* buf = static_cast<char*>(malloc(json_len + 1));
-    if (!buf) return 0;
-
-    std::memcpy(buf, json.c_str(), json_len + 1);
-    *out_ptr = buf;
-    return json_len;
+    return alloc_output_string(json, out_ptr);
 }
 
 /**

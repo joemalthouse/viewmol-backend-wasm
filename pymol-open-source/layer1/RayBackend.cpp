@@ -8,7 +8,8 @@
 
 #include <cmath>
 #include <cstdio>
-#include <set>
+#include <cstring>
+#include <unordered_set>
 
 #include "Character.h"
 #include "Color.h"
@@ -20,6 +21,32 @@ namespace {
 
 constexpr std::uint32_t kFlagNoLighting = 0x2;
 constexpr std::uint32_t kFlagWobble = 0x4;
+
+// Base64 encoding table
+constexpr char kBase64[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+inline void base64Append(std::string& o, const unsigned char* data, std::size_t len)
+{
+  o += '"';
+  std::size_t i = 0;
+  for (; i + 2 < len; i += 3) {
+    unsigned int triplet = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
+    o += kBase64[(triplet >> 18) & 0x3F];
+    o += kBase64[(triplet >> 12) & 0x3F];
+    o += kBase64[(triplet >>  6) & 0x3F];
+    o += kBase64[triplet & 0x3F];
+  }
+  if (i < len) {
+    unsigned int triplet = data[i] << 16;
+    if (i + 1 < len) triplet |= data[i + 1] << 8;
+    o += kBase64[(triplet >> 18) & 0x3F];
+    o += kBase64[(triplet >> 12) & 0x3F];
+    o += (i + 1 < len) ? kBase64[(triplet >> 6) & 0x3F] : '=';
+    o += '=';
+  }
+  o += '"';
+}
 
 inline std::array<float, 3> toArr(const float* v)
 {
@@ -42,14 +69,6 @@ inline std::array<float, 3> resolveRampColor(
 
 // ---------- JSON helpers (no allocations, append-only) ----------
 
-inline void jFloat(std::string& o, float v)
-{
-  char buf[48];
-  int n = std::snprintf(buf, sizeof(buf), "%.9g",
-      static_cast<double>(std::isfinite(v) ? v : 0.0f));
-  o.append(buf, n > 0 ? static_cast<std::size_t>(n) : 1);
-}
-
 inline void jInt(std::string& o, int v)
 {
   if (v == 0) { o += '0'; return; }
@@ -70,6 +89,26 @@ inline void jUint(std::string& o, std::uint32_t v)
   int pos = 10;
   while (v > 0) { buf[pos--] = '0' + static_cast<char>(v % 10); v /= 10; }
   o.append(buf + pos + 1, static_cast<std::size_t>(10 - pos));
+}
+
+// Fast float-to-string: writes up to 9 significant digits.
+// For exact-zero and small integers (common in scene data) we
+// short-circuit to avoid snprintf entirely.
+inline void jFloat(std::string& o, float v)
+{
+  if (!std::isfinite(v)) { o += '0'; return; }
+  if (v == 0.0f) { o += '0'; return; }
+
+  // Fast path for small integers (very common: 0, 1, -1, 2, etc.)
+  if (v == static_cast<float>(static_cast<int>(v)) &&
+      v >= -999999.0f && v <= 999999.0f) {
+    jInt(o, static_cast<int>(v));
+    return;
+  }
+
+  char buf[32];
+  int n = std::snprintf(buf, sizeof(buf), "%.9g", static_cast<double>(v));
+  o.append(buf, n > 0 ? static_cast<std::size_t>(n) : 1);
 }
 
 template <std::size_t N>
@@ -222,7 +261,7 @@ ScenePacket buildScenePacket(const CRay* ray)
   // Collect unique character bitmaps from both primitives and label runs
   // in a single pass.
   {
-    std::set<int> char_ids;
+    std::unordered_set<int> char_ids;
     for (const auto& pk : s.primitives)
       if (pk.type == 5 && pk.char_id > 0) char_ids.insert(pk.char_id);
     for (const auto& lr : s.label_runs)
@@ -263,7 +302,11 @@ std::string serializeScenePacketJSON(const ScenePacket& scene)
   constexpr int kPrimStride = 46;
 
   std::string o;
-  o.reserve(256 + scene.primitives.size() * 480);
+  // Estimate: 256 header + ~480 per primitive + ~1.37x base64 for bitmaps + 256 for random_table
+  std::size_t bitmap_est = 0;
+  for (const auto& cb : scene.char_bitmaps)
+    bitmap_est += static_cast<std::size_t>(cb.width) * cb.height * 4 * 4 / 3 + 64;
+  o.reserve(512 + scene.primitives.size() * 480 + bitmap_est + 256 * 16);
 
   o += "{\"format\":\"viewmol-ray-v2\"";
   o += ",\"coordinate_space\":\"world\"";
@@ -306,7 +349,7 @@ std::string serializeScenePacketJSON(const ScenePacket& scene)
   }
   o += ']';
 
-  // Character bitmaps.
+  // Character bitmaps (RGBA data as base64 for compactness).
   o += ",\"char_bitmaps\":[";
   for (std::size_t ci = 0; ci < scene.char_bitmaps.size(); ++ci) {
     if (ci) o += ',';
@@ -314,12 +357,9 @@ std::string serializeScenePacketJSON(const ScenePacket& scene)
     o += "{\"char_id\":"; jInt(o, cb.char_id);
     o += ",\"w\":";       jInt(o, cb.width);
     o += ",\"h\":";       jInt(o, cb.height);
-    o += ",\"rgba\":[";
-    for (std::size_t bi = 0; bi < cb.rgba_data.size(); ++bi) {
-      if (bi) o += ',';
-      jUint(o, static_cast<std::uint32_t>(cb.rgba_data[bi]));
-    }
-    o += "]}";
+    o += ",\"rgba_b64\":";
+    base64Append(o, cb.rgba_data.data(), cb.rgba_data.size());
+    o += '}';
   }
   o += ']';
 
