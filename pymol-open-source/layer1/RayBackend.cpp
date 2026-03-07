@@ -440,8 +440,9 @@ namespace {
 // Append raw bytes to the output buffer.
 inline void emit(std::vector<unsigned char>& buf, const void* data, std::size_t n)
 {
-  const auto* p = static_cast<const unsigned char*>(data);
-  buf.insert(buf.end(), p, p + n);
+  const auto off = buf.size();
+  buf.resize(off + n);
+  std::memcpy(buf.data() + off, data, n);
 }
 
 // Pad to alignment boundary.
@@ -512,37 +513,13 @@ std::vector<unsigned char> serializeScenePacketBinary(const ScenePacket& scene)
   std::memcpy(buf.data(), &hdr, kHeaderSize);
 
   // --- Primitives: pack as 46 × float32 per primitive ---
+  // PrimitivePacket's memory layout (10 scalars + 12 vec3s = 46 × 4 bytes)
+  // exactly matches the binary wire format, so we bulk-copy the entire vector.
+  static_assert(sizeof(PrimitivePacket) == 46 * sizeof(float),
+                "PrimitivePacket layout must match 46-float wire format");
   alignTo(buf, 4);
   std::size_t primOffset = buf.size();
-  for (const auto& pk : scene.primitives) {
-    // 10 scalar values as float32 (uint32/int cast to float bits via memcpy)
-    float scalars[10];
-    std::memcpy(&scalars[0], &pk.type, sizeof(float));
-    std::memcpy(&scalars[1], &pk.flags, sizeof(float));
-    scalars[2] = pk.trans;
-    scalars[3] = pk.r1;
-    scalars[4] = pk.r2;
-    scalars[5] = pk.l1;
-    std::memcpy(&scalars[6], &pk.char_id, sizeof(float));
-    std::memcpy(&scalars[7], &pk.cull, sizeof(float));
-    std::memcpy(&scalars[8], &pk.cap1, sizeof(float));
-    std::memcpy(&scalars[9], &pk.cap2, sizeof(float));
-    emit(buf, scalars, sizeof(scalars));
-
-    // 12 vec3 fields: v1, v2, v3, n0, n1, n2, n3, c1, c2, c3, ic, tr
-    emit(buf, pk.v1.data(), 3 * sizeof(float));
-    emit(buf, pk.v2.data(), 3 * sizeof(float));
-    emit(buf, pk.v3.data(), 3 * sizeof(float));
-    emit(buf, pk.n0.data(), 3 * sizeof(float));
-    emit(buf, pk.n1.data(), 3 * sizeof(float));
-    emit(buf, pk.n2.data(), 3 * sizeof(float));
-    emit(buf, pk.n3.data(), 3 * sizeof(float));
-    emit(buf, pk.c1.data(), 3 * sizeof(float));
-    emit(buf, pk.c2.data(), 3 * sizeof(float));
-    emit(buf, pk.c3.data(), 3 * sizeof(float));
-    emit(buf, pk.ic.data(), 3 * sizeof(float));
-    emit(buf, pk.tr.data(), 3 * sizeof(float));
-  }
+  emit(buf, scene.primitives.data(), scene.primitives.size() * sizeof(PrimitivePacket));
 
   // --- Character bitmaps ---
   alignTo(buf, 4);

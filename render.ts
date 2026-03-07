@@ -41,6 +41,26 @@ export interface RenderOptions {
     [key: string]: unknown;
 }
 
+/** Sensible defaults matching the viewmol-ray-tracer's expected settings. */
+const DEFAULT_SETTINGS: Readonly<RenderSettings> = {
+    rayShadows: 1,
+    ambient: 0.2,
+    direct: 0.8,
+    specPower: 55,
+    specReflect: 0.5,
+    reflect: 0.45,
+    gamma: 1.0,
+    lightCount: 1,
+    light: [0, 0, -1],
+    opaqueBg: true,
+    bgRgb: [0, 0, 0],
+};
+
+const DEFAULT_OPTIONS: Readonly<RenderOptions> = {
+    executionProfile: 'parity',
+    returnRGBA: true,
+};
+
 /**
  * Renders a viewmol-ray-v2 scene JSON string using the viewmol-ray-tracer
  * WebGPU ray tracer.
@@ -75,26 +95,8 @@ export async function renderRayScene(
         throw new Error('ViewMolAPI instance does not have renderSceneJSON method');
     }
 
-    const mergedSettings: Record<string, unknown> = {
-        rayShadows: 1,
-        ambient: 0.2,
-        direct: 0.8,
-        specPower: 55,
-        specReflect: 0.5,
-        reflect: 0.45,
-        gamma: 1.0,
-        lightCount: 1,
-        light: [0, 0, -1],
-        opaqueBg: true,
-        bgRgb: [0, 0, 0],
-        ...(settings || {})
-    };
-
-    const mergedOptions: Record<string, unknown> = {
-        executionProfile: 'parity',
-        returnRGBA: true,
-        ...(renderOptions || {})
-    };
+    const mergedSettings = { ...DEFAULT_SETTINGS, ...settings };
+    const mergedOptions = { ...DEFAULT_OPTIONS, ...renderOptions };
 
     return api.renderSceneJSON(sceneJSON, mergedSettings, width, height, mergedOptions);
 }
@@ -138,26 +140,8 @@ export async function renderRaySceneBinary(
         );
     }
 
-    const mergedSettings: Record<string, unknown> = {
-        rayShadows: 1,
-        ambient: 0.2,
-        direct: 0.8,
-        specPower: 55,
-        specReflect: 0.5,
-        reflect: 0.45,
-        gamma: 1.0,
-        lightCount: 1,
-        light: [0, 0, -1],
-        opaqueBg: true,
-        bgRgb: [0, 0, 0],
-        ...(settings || {})
-    };
-
-    const mergedOptions: Record<string, unknown> = {
-        executionProfile: 'parity',
-        returnRGBA: true,
-        ...(renderOptions || {})
-    };
+    const mergedSettings = { ...DEFAULT_SETTINGS, ...settings };
+    const mergedOptions = { ...DEFAULT_OPTIONS, ...renderOptions };
 
     return api.renderSceneBinary(sceneBinary, mergedSettings, width, height, mergedOptions);
 }

@@ -419,6 +419,75 @@ interface BrowserCompareResult {
     fgMaeRgb: number;
 }
 
+// GPU render function (string-based to avoid tsx __name injection).
+const RENDER_FN_CODE = `async function(sceneJson, settings, width, height) {
+    return window.renderSceneJSON(sceneJson, settings, width, height, {
+        renderPath: 'readback', executionProfile: 'parity',
+        cachePolicy: 'single', forceRepack: 1,
+    });
+}`;
+
+// Browser-side PSNR comparison function (string-based to avoid tsx __name injection).
+// Hoisted to module scope so it's not re-created on every compareInBrowser() call.
+const COMPARE_FN_BODY = `async ([a, b, w, h]) => {
+    const b64ToBytes = function(b64) {
+        const binary = atob(b64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return bytes;
+    };
+    const blobToImageData = async function(blob, _w, _h) {
+        const bmp = await createImageBitmap(blob);
+        const canvas = new OffscreenCanvas(_w, _h);
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.clearRect(0, 0, _w, _h);
+        ctx.drawImage(bmp, 0, 0, _w, _h);
+        bmp.close();
+        return ctx.getImageData(0, 0, _w, _h).data;
+    };
+
+    const aBlob = new Blob([b64ToBytes(a).buffer], { type: 'image/png' });
+    const bBlob = new Blob([b64ToBytes(b).buffer], { type: 'image/png' });
+    const aData = await blobToImageData(aBlob, w, h);
+    const bData = await blobToImageData(bBlob, w, h);
+
+    const pixels = Math.floor(Math.min(aData.length, bData.length) / 4);
+    let sumAbsRgb = 0, sumSqRgb = 0, sumAbsAlpha = 0, maxDiff = 0;
+    let diffPx1 = 0, diffPx4 = 0, diffPx8 = 0;
+    let fgCount = 0, fgAbsRgb = 0;
+    for (let i = 0; i < pixels; i++) {
+        const off = i * 4;
+        const dr = Math.abs(aData[off] - bData[off]);
+        const dg = Math.abs(aData[off + 1] - bData[off + 1]);
+        const db = Math.abs(aData[off + 2] - bData[off + 2]);
+        const da = Math.abs(aData[off + 3] - bData[off + 3]);
+        const pxMax = Math.max(dr, dg, db, da);
+        maxDiff = Math.max(maxDiff, pxMax);
+        const rgbAbs = dr + dg + db;
+        sumAbsRgb += rgbAbs;
+        sumSqRgb += dr * dr + dg * dg + db * db;
+        sumAbsAlpha += da;
+        if (pxMax > 1) diffPx1++;
+        if (pxMax > 4) diffPx4++;
+        if (pxMax > 8) diffPx8++;
+        const aFg = (aData[off] + aData[off + 1] + aData[off + 2]) > 15;
+        const bFg = (bData[off] + bData[off + 1] + bData[off + 2]) > 15;
+        if (aFg || bFg) { fgCount++; fgAbsRgb += rgbAbs; }
+    }
+    const denomRgb = Math.max(1, pixels * 3);
+    const rmseRgb = Math.sqrt(sumSqRgb / denomRgb);
+    const psnrRgb = rmseRgb > 0 ? (20 * Math.log10(255 / rmseRgb)) : 99;
+    return {
+        pixels, maeRgb: sumAbsRgb / denomRgb, rmseRgb, psnrRgb,
+        maeAlpha: sumAbsAlpha / Math.max(1, pixels), maxDiff,
+        pctDiffPxGt1: (100 * diffPx1) / Math.max(1, pixels),
+        pctDiffPxGt4: (100 * diffPx4) / Math.max(1, pixels),
+        pctDiffPxGt8: (100 * diffPx8) / Math.max(1, pixels),
+        fgPixels: fgCount,
+        fgMaeRgb: fgAbsRgb / Math.max(1, fgCount * 3),
+    };
+}`;
+
 async function compareInBrowser(
     page: any,
     nativePngB64: string,
@@ -426,67 +495,8 @@ async function compareInBrowser(
     width: number,
     height: number,
 ): Promise<BrowserCompareResult> {
-    // Use string-based evaluate to avoid tsx __name decorator injection
-    const fnBody = `async ([a, b, w, h]) => {
-        const b64ToBytes = function(b64) {
-            const binary = atob(b64);
-            const bytes = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-            return bytes;
-        };
-        const blobToImageData = async function(blob, _w, _h) {
-            const bmp = await createImageBitmap(blob);
-            const canvas = new OffscreenCanvas(_w, _h);
-            const ctx = canvas.getContext('2d', { willReadFrequently: true });
-            ctx.clearRect(0, 0, _w, _h);
-            ctx.drawImage(bmp, 0, 0, _w, _h);
-            bmp.close();
-            return ctx.getImageData(0, 0, _w, _h).data;
-        };
-
-        const aBlob = new Blob([b64ToBytes(a).buffer], { type: 'image/png' });
-        const bBlob = new Blob([b64ToBytes(b).buffer], { type: 'image/png' });
-        const aData = await blobToImageData(aBlob, w, h);
-        const bData = await blobToImageData(bBlob, w, h);
-
-        const pixels = Math.floor(Math.min(aData.length, bData.length) / 4);
-        let sumAbsRgb = 0, sumSqRgb = 0, sumAbsAlpha = 0, maxDiff = 0;
-        let diffPx1 = 0, diffPx4 = 0, diffPx8 = 0;
-        let fgCount = 0, fgAbsRgb = 0;
-        for (let i = 0; i < pixels; i++) {
-            const off = i * 4;
-            const dr = Math.abs(aData[off] - bData[off]);
-            const dg = Math.abs(aData[off + 1] - bData[off + 1]);
-            const db = Math.abs(aData[off + 2] - bData[off + 2]);
-            const da = Math.abs(aData[off + 3] - bData[off + 3]);
-            const pxMax = Math.max(dr, dg, db, da);
-            maxDiff = Math.max(maxDiff, pxMax);
-            const rgbAbs = dr + dg + db;
-            sumAbsRgb += rgbAbs;
-            sumSqRgb += dr * dr + dg * dg + db * db;
-            sumAbsAlpha += da;
-            if (pxMax > 1) diffPx1++;
-            if (pxMax > 4) diffPx4++;
-            if (pxMax > 8) diffPx8++;
-            const aFg = (aData[off] + aData[off + 1] + aData[off + 2]) > 15;
-            const bFg = (bData[off] + bData[off + 1] + bData[off + 2]) > 15;
-            if (aFg || bFg) { fgCount++; fgAbsRgb += rgbAbs; }
-        }
-        const denomRgb = Math.max(1, pixels * 3);
-        const rmseRgb = Math.sqrt(sumSqRgb / denomRgb);
-        const psnrRgb = rmseRgb > 0 ? (20 * Math.log10(255 / rmseRgb)) : 99;
-        return {
-            pixels, maeRgb: sumAbsRgb / denomRgb, rmseRgb, psnrRgb,
-            maeAlpha: sumAbsAlpha / Math.max(1, pixels), maxDiff,
-            pctDiffPxGt1: (100 * diffPx1) / Math.max(1, pixels),
-            pctDiffPxGt4: (100 * diffPx4) / Math.max(1, pixels),
-            pctDiffPxGt8: (100 * diffPx8) / Math.max(1, pixels),
-            fgPixels: fgCount,
-            fgMaeRgb: fgAbsRgb / Math.max(1, fgCount * 3),
-        };
-    }`;
     const args = [nativePngB64, wasmPngB64, width, height];
-    return page.evaluate(`(${fnBody})(${JSON.stringify(args)})`);
+    return page.evaluate(`(${COMPARE_FN_BODY})(${JSON.stringify(args)})`);
 }
 
 // ---------------------------------------------------------------------------
@@ -715,24 +725,16 @@ async function run(): Promise<void> {
             // -- GPU render both scenes --
             const gpuStart = Date.now();
 
-            // Render native scene (string-based evaluate to avoid tsx __name injection)
-            const renderCode = `async function(sceneJson, settings, width, height) {
-                return window.renderSceneJSON(sceneJson, settings, width, height, {
-                    renderPath: 'readback', executionProfile: 'parity',
-                    cachePolicy: 'single', forceRepack: 1,
-                });
-            }`;
-
             let nativeGpu: GpuRenderOutput | null = null;
             let wasmGpu: GpuRenderOutput | null = null;
             try {
                 nativeGpu = await page.evaluate(
-                    `(${renderCode})(${JSON.stringify(nativeSceneJson)}, ${JSON.stringify(settings)}, ${opts.width}, ${opts.height})`,
+                    `(${RENDER_FN_CODE})(${JSON.stringify(nativeSceneJson)}, ${JSON.stringify(settings)}, ${opts.width}, ${opts.height})`,
                 ) as GpuRenderOutput | null;
 
                 // Render WASM scene (use same settings from native for fair comparison)
                 wasmGpu = await page.evaluate(
-                    `(${renderCode})(${JSON.stringify(wasmSceneJson)}, ${JSON.stringify(settings)}, ${opts.width}, ${opts.height})`,
+                    `(${RENDER_FN_CODE})(${JSON.stringify(wasmSceneJson)}, ${JSON.stringify(settings)}, ${opts.width}, ${opts.height})`,
                 ) as GpuRenderOutput | null;
             } catch (gpuErr) {
                 const gpuElapsedSec = (Date.now() - gpuStart) / 1000;
