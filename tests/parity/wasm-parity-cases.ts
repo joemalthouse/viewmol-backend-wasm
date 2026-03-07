@@ -13,7 +13,7 @@
  * parity test validates.
  */
 
-import type { PyMOLHeadless } from '../pymol.js';
+import type { PyMOLHeadless } from '../../packages/pymol-wasm/src/pymol.js';
 
 export interface TestFile {
     /** Path relative to viewmol-ray-tracer root (e.g. 'testdata/pept.pdb') */

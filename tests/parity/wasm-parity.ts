@@ -11,7 +11,7 @@
  *  4. PSNR(image_A, image_B) computed to validate WASM command parity
  *
  * Usage:
- *   npx tsx tests/wasm-parity.ts --suite all --save-images
+ *   npx tsx tests/parity/wasm-parity.ts --suite all --save-images
  */
 
 import * as fs from 'fs/promises';
@@ -20,8 +20,8 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { chromium } from 'playwright';
 
-import { PyMOLHeadless, LOAD_FORMAT_PDB_STR } from '../pymol.js';
-import type { PyMOLModule } from '../pymol.js';
+import { PyMOLHeadless, LOAD_FORMAT_PDB_STR } from '../../packages/pymol-wasm/src/pymol.js';
+import type { PyMOLModule } from '../../packages/pymol-wasm/src/pymol.js';
 import { compareRGBA, classify } from './psnr.js';
 import type { CompareMetrics, PassLevel } from './psnr.js';
 import { ALL_CASES, WASM_SUITES } from './wasm-parity-cases.js';
@@ -29,8 +29,8 @@ import type { WasmParityCase, TestFile } from './wasm-parity-cases.js';
 
 const execFileAsync = promisify(execFile);
 
-const PROJECT_ROOT = path.resolve(import.meta.dirname, '..');
-const VIEWMOL_ROOT = path.resolve(PROJECT_ROOT, '../viewmol-ray-tracer');
+const PROJECT_ROOT = path.resolve(import.meta.dirname, '../..');
+const VIEWMOL_ROOT = path.resolve(PROJECT_ROOT, 'packages/ray-tracer');
 
 // ---------------------------------------------------------------------------
 // Settings extraction Python code (same as native-parity.ts)
@@ -601,7 +601,7 @@ async function run(): Promise<void> {
     console.log('Loading WASM module...');
     const { createRequire } = await import('module');
     const require = createRequire(import.meta.url);
-    const createPyMOL = require(path.resolve(PROJECT_ROOT, 'load-wasm.cjs'));
+    const createPyMOL = require(path.resolve(PROJECT_ROOT, 'packages/pymol-wasm/src/load-wasm.cjs'));
     console.log('WASM module loaded.');
 
     // Connect to Chrome via CDP
