@@ -207,7 +207,7 @@ export const LOAD_FORMAT_PDB_STR = 9;
 export const SCENE_VIEW_SIZE = 25;
 
 /** Valid representation names for show/hide */
-export type RepresentationName = 'lines' | 'spheres' | 'surface' | 'ribbon' | 'cartoon' | 'sticks' | 'mesh' | 'dots';
+export type RepresentationName = 'lines' | 'spheres' | 'surface' | 'ribbon' | 'cartoon' | 'sticks' | 'mesh' | 'dots' | 'nb_spheres' | 'nonbonded' | 'ellipsoids' | 'ellipsoid' | 'dashes' | 'labels' | 'cell' | 'cgo';
 
 const textEncoder = new TextEncoder();
 

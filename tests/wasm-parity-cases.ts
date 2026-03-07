@@ -292,17 +292,8 @@ const REP_CASES: WasmParityCase[] = [
         ],
         wasmSetup: (p) => {
             p.hide('everything'); p.show('sticks', 'mol');
-            // nb_spheres is shown as a special rep name
-            const m = p.getModule();
-            const ptr = p.getInstancePtr();
-            const repPtr = m.stringToNewUTF8('nb_spheres');
-            const selPtr = m.stringToNewUTF8('mol');
-            try {
-                m._PyMOLWasm_Show(ptr, repPtr, selPtr);
-            } finally {
-                m._free(selPtr);
-                m._free(repPtr);
-            }
+            // nb_spheres is now recognized by rep_name_to_id
+            p.show('nb_spheres', 'mol');
             p.setSetting(SETTING.ray_shadow, 1);
         },
     },

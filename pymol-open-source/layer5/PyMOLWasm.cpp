@@ -52,9 +52,12 @@ static int rep_name_to_id(const char* rep_name) {
     if (strcmp(rep_name, "dots") == 0) return cRepDot;
     if (strcmp(rep_name, "labels") == 0) return cRepLabel;
     if (strcmp(rep_name, "nonbonded") == 0) return cRepNonbonded;
+    if (strcmp(rep_name, "nb_spheres") == 0) return cRepNonbondedSphere;
     if (strcmp(rep_name, "cell") == 0) return cRepCell;
     if (strcmp(rep_name, "cgo") == 0) return cRepCGO;
     if (strcmp(rep_name, "ellipsoids") == 0) return cRepEllipsoid;
+    if (strcmp(rep_name, "ellipsoid") == 0) return cRepEllipsoid;
+    if (strcmp(rep_name, "dashes") == 0) return cRepDash;
     return -1;
 }
 
