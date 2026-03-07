@@ -100,6 +100,69 @@ export async function renderRayScene(
 }
 
 /**
+ * Renders a viewmol-bin-v1 binary scene buffer using the viewmol-ray-tracer
+ * WebGPU ray tracer.
+ *
+ * This avoids all JSON serialization/parsing overhead — the primitive
+ * section of the binary buffer can be uploaded directly to a WebGPU
+ * storage buffer without repacking.
+ *
+ * @param sceneBinary The Uint8Array from PyMOLHeadless.getRaySceneBinary()
+ * @param width Output image width
+ * @param height Output image height
+ * @param settings Optional render settings (lighting, shadows, etc.)
+ * @param renderOptions Optional render options (execution profile, etc.)
+ * @returns RGBA pixel data as Uint8Array (width * height * 4 bytes), or null
+ */
+export async function renderRaySceneBinary(
+    sceneBinary: Uint8Array,
+    width: number,
+    height: number,
+    settings?: RenderSettings,
+    renderOptions?: RenderOptions
+): Promise<Uint8Array | null> {
+    const ViewMolAPI = getViewMolAPI();
+    if (!ViewMolAPI) {
+        throw new Error(
+            'ViewMolAPI not found. Load viewmol-ray-tracer.js via <script> tag ' +
+            'or require() before calling renderRaySceneBinary().'
+        );
+    }
+
+    const api = new ViewMolAPI();
+
+    if (typeof api.renderSceneBinary !== 'function') {
+        throw new Error(
+            'ViewMolAPI instance does not have renderSceneBinary method. ' +
+            'Update viewmol-ray-tracer to a version that supports binary scene input.'
+        );
+    }
+
+    const mergedSettings: Record<string, unknown> = {
+        rayShadows: 1,
+        ambient: 0.2,
+        direct: 0.8,
+        specPower: 55,
+        specReflect: 0.5,
+        reflect: 0.45,
+        gamma: 1.0,
+        lightCount: 1,
+        light: [0, 0, -1],
+        opaqueBg: true,
+        bgRgb: [0, 0, 0],
+        ...(settings || {})
+    };
+
+    const mergedOptions: Record<string, unknown> = {
+        executionProfile: 'parity',
+        returnRGBA: true,
+        ...(renderOptions || {})
+    };
+
+    return api.renderSceneBinary(sceneBinary, mergedSettings, width, height, mergedOptions);
+}
+
+/**
  * Gets the ViewMolAPI constructor from the global scope.
  */
 function getViewMolAPI(): (new () => any) | null {
