@@ -431,4 +431,215 @@ std::string serializeScenePacketJSON(const ScenePacket& scene)
   return o;
 }
 
+// ---------------------------------------------------------------------------
+// Binary serialisation — zero-copy path for WebGPU compute.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Append raw bytes to the output buffer.
+inline void emit(std::vector<unsigned char>& buf, const void* data, std::size_t n)
+{
+  const auto* p = static_cast<const unsigned char*>(data);
+  buf.insert(buf.end(), p, p + n);
+}
+
+// Pad to alignment boundary.
+inline void alignTo(std::vector<unsigned char>& buf, std::size_t alignment)
+{
+  std::size_t pad = (alignment - (buf.size() % alignment)) % alignment;
+  buf.insert(buf.end(), pad, 0);
+}
+
+} // namespace
+
+std::vector<unsigned char> serializeScenePacketBinary(const ScenePacket& scene)
+{
+  // --- Calculate sizes and offsets ---
+  constexpr int kPrimStride = 46;
+  constexpr std::size_t kHeaderSize = sizeof(BinarySceneHeader);
+
+  static_assert(kHeaderSize % 4 == 0, "Header must be 4-byte aligned");
+
+  const std::size_t primBytes = scene.primitives.size() * kPrimStride * sizeof(float);
+
+  // Character bitmap headers + RGBA data
+  std::size_t charHeadersBytes = scene.char_bitmaps.size() * sizeof(BinaryCharBitmapHeader);
+  std::size_t charDataBytes = 0;
+  for (const auto& cb : scene.char_bitmaps)
+    charDataBytes += cb.rgba_data.size();
+
+  // Label runs + glyphs + text
+  std::size_t runHeadersBytes = scene.label_runs.size() * sizeof(BinaryLabelRunHeader);
+  std::size_t glyphHeadersBytes = scene.glyphs.size() * sizeof(BinaryGlyphHeader);
+  std::size_t textBytes = 0;
+  for (const auto& lr : scene.label_runs)
+    textBytes += lr.text.size() + 1; // null terminator
+
+  // Estimate total size (generous to avoid reallocation)
+  std::size_t est = kHeaderSize + primBytes + charHeadersBytes + charDataBytes +
+                    runHeadersBytes + glyphHeadersBytes + textBytes + 256;
+
+  std::vector<unsigned char> buf;
+  buf.reserve(est);
+
+  // --- Write header placeholder (fill offsets later) ---
+  BinarySceneHeader hdr{};
+  std::memcpy(hdr.magic, "viewmol-bin-v1\0\0", 16);
+  hdr.header_size = static_cast<uint32_t>(kHeaderSize);
+  hdr.prim_stride = kPrimStride;
+  hdr.prim_count = static_cast<uint32_t>(scene.primitives.size());
+  hdr.char_count = static_cast<uint32_t>(scene.char_bitmaps.size());
+  hdr.run_count = static_cast<uint32_t>(scene.label_runs.size());
+  hdr.glyph_count = static_cast<uint32_t>(scene.glyphs.size());
+
+  // Camera / scene metadata
+  std::memcpy(hdr.model_view, scene.model_view.data(), 16 * sizeof(float));
+  std::memcpy(hdr.volume, scene.volume.data(), 6 * sizeof(float));
+  std::memcpy(hdr.pos, scene.pos.data(), 3 * sizeof(float));
+  hdr.fov = scene.fov;
+  hdr.width = scene.width;
+  hdr.height = scene.height;
+  hdr.orthoscopic = scene.orthoscopic;
+  hdr.wobble = scene.wobble;
+  std::memcpy(hdr.wobble_params, scene.wobble_params.data(), 3 * sizeof(float));
+  hdr.ray_improve_shadows = scene.ray_improve_shadows;
+  hdr.ray_shadow_fudge = scene.ray_shadow_fudge;
+  std::memcpy(hdr.random_table, scene.random_table.data(), 256 * sizeof(float));
+
+  // Write header (will patch offsets at the end)
+  buf.resize(kHeaderSize);
+  std::memcpy(buf.data(), &hdr, kHeaderSize);
+
+  // --- Primitives: pack as 46 × float32 per primitive ---
+  alignTo(buf, 4);
+  std::size_t primOffset = buf.size();
+  for (const auto& pk : scene.primitives) {
+    // 10 scalar values as float32 (uint32/int cast to float bits via memcpy)
+    float scalars[10];
+    std::memcpy(&scalars[0], &pk.type, sizeof(float));
+    std::memcpy(&scalars[1], &pk.flags, sizeof(float));
+    scalars[2] = pk.trans;
+    scalars[3] = pk.r1;
+    scalars[4] = pk.r2;
+    scalars[5] = pk.l1;
+    std::memcpy(&scalars[6], &pk.char_id, sizeof(float));
+    std::memcpy(&scalars[7], &pk.cull, sizeof(float));
+    std::memcpy(&scalars[8], &pk.cap1, sizeof(float));
+    std::memcpy(&scalars[9], &pk.cap2, sizeof(float));
+    emit(buf, scalars, sizeof(scalars));
+
+    // 12 vec3 fields: v1, v2, v3, n0, n1, n2, n3, c1, c2, c3, ic, tr
+    emit(buf, pk.v1.data(), 3 * sizeof(float));
+    emit(buf, pk.v2.data(), 3 * sizeof(float));
+    emit(buf, pk.v3.data(), 3 * sizeof(float));
+    emit(buf, pk.n0.data(), 3 * sizeof(float));
+    emit(buf, pk.n1.data(), 3 * sizeof(float));
+    emit(buf, pk.n2.data(), 3 * sizeof(float));
+    emit(buf, pk.n3.data(), 3 * sizeof(float));
+    emit(buf, pk.c1.data(), 3 * sizeof(float));
+    emit(buf, pk.c2.data(), 3 * sizeof(float));
+    emit(buf, pk.c3.data(), 3 * sizeof(float));
+    emit(buf, pk.ic.data(), 3 * sizeof(float));
+    emit(buf, pk.tr.data(), 3 * sizeof(float));
+  }
+
+  // --- Character bitmaps ---
+  alignTo(buf, 4);
+  std::size_t charOffset = buf.size();
+
+  // First pass: write headers (data_offset filled in second pass)
+  std::size_t charHeaderStart = buf.size();
+  buf.resize(charHeaderStart + charHeadersBytes);
+
+  // Second pass: write RGBA data and patch headers
+  for (std::size_t ci = 0; ci < scene.char_bitmaps.size(); ++ci) {
+    const auto& cb = scene.char_bitmaps[ci];
+    BinaryCharBitmapHeader cbh{};
+    cbh.char_id = cb.char_id;
+    cbh.width = cb.width;
+    cbh.height = cb.height;
+    cbh.data_offset = static_cast<uint32_t>(buf.size());
+    cbh.data_size = static_cast<uint32_t>(cb.rgba_data.size());
+    // Patch header in place
+    std::memcpy(buf.data() + charHeaderStart + ci * sizeof(BinaryCharBitmapHeader),
+                &cbh, sizeof(BinaryCharBitmapHeader));
+    // Write RGBA data
+    emit(buf, cb.rgba_data.data(), cb.rgba_data.size());
+  }
+
+  // --- Label runs ---
+  alignTo(buf, 4);
+  std::size_t runOffset = buf.size();
+
+  // Write label text first to get offsets
+  std::size_t textStart = runOffset + runHeadersBytes;
+  // Actually, write runs first as headers, then glyphs, then text
+  // Reserve space for run headers
+  std::size_t runHeaderStart = buf.size();
+  buf.resize(runHeaderStart + runHeadersBytes);
+
+  // --- Glyphs ---
+  alignTo(buf, 4);
+  std::size_t glyphOffset = buf.size();
+  for (const auto& g : scene.glyphs) {
+    BinaryGlyphHeader gh{};
+    gh.char_id = g.char_id;
+    gh.offset_px[0] = g.offset_px[0];
+    gh.offset_px[1] = g.offset_px[1];
+    gh.size_px[0] = g.size_px[0];
+    gh.size_px[1] = g.size_px[1];
+    gh.advance_px = g.advance_px;
+    gh.xorig = g.xorig;
+    gh.yorig = g.yorig;
+    emit(buf, &gh, sizeof(gh));
+  }
+
+  // --- Label text ---
+  alignTo(buf, 1); // text doesn't need alignment
+  std::size_t textOffset = buf.size();
+
+  // Now write label run headers and text
+  for (std::size_t li = 0; li < scene.label_runs.size(); ++li) {
+    const auto& lr = scene.label_runs[li];
+    BinaryLabelRunHeader lrh{};
+    std::memcpy(lrh.anchor, lr.anchor.data(), 3 * sizeof(float));
+    std::memcpy(lrh.color, lr.color.data(), 4 * sizeof(float));
+    std::memcpy(lrh.screen_offset, lr.screen_offset.data(), 3 * sizeof(float));
+    std::memcpy(lrh.indent_px, lr.indent_px.data(), 3 * sizeof(float));
+    lrh.scale = lr.scale;
+    lrh.font_id = lr.font_id;
+    lrh.font_size = lr.font_size;
+    lrh.relative_mode = lr.relative_mode;
+    lrh.prim_start = lr.prim_start;
+    lrh.prim_count = lr.prim_count;
+    lrh.glyph_start = lr.glyph_start;
+    lrh.glyph_count = lr.glyph_count;
+    lrh.text_offset = static_cast<uint32_t>(buf.size());
+    lrh.text_length = static_cast<uint32_t>(lr.text.size());
+    // Patch header in place
+    std::memcpy(buf.data() + runHeaderStart + li * sizeof(BinaryLabelRunHeader),
+                &lrh, sizeof(BinaryLabelRunHeader));
+    // Write text + null terminator
+    emit(buf, lr.text.data(), lr.text.size());
+    buf.push_back(0);
+  }
+
+  // Update text offset for header if no label runs
+  if (scene.label_runs.empty()) {
+    textOffset = buf.size();
+  }
+
+  // --- Patch header with final offsets ---
+  auto* h = reinterpret_cast<BinarySceneHeader*>(buf.data());
+  h->prim_offset = static_cast<uint32_t>(primOffset);
+  h->char_offset = static_cast<uint32_t>(charOffset);
+  h->run_offset = static_cast<uint32_t>(runOffset);
+  h->glyph_offset = static_cast<uint32_t>(glyphOffset);
+  h->text_offset = static_cast<uint32_t>(textOffset);
+  h->total_size = static_cast<uint32_t>(buf.size());
+
+  return buf;
+}
+
 } // namespace pymol::ray

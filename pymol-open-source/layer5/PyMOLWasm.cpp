@@ -1142,6 +1142,152 @@ int PyMOLWasm_GetRayScene(CPyMOL* pymolPtr, int width, int height, char** out_pt
 }
 
 /**
+ * Exports the current scene as a binary buffer for zero-copy WebGPU upload.
+ *
+ * The binary format ("viewmol-bin-v1") packs primitives as flat float32 arrays
+ * that can be uploaded directly to WebGPU storage buffers without JSON
+ * parse/repack overhead. See RayBackend.h for format documentation.
+ *
+ * @param out_ptr  Receives a malloc'd buffer. Caller must free().
+ * @param out_size Receives the buffer size in bytes.
+ * @return 1 on success, 0 on failure.
+ */
+int PyMOLWasm_GetRaySceneBinary(CPyMOL* pymolPtr, int width, int height,
+                                 unsigned char** out_ptr, int* out_size) {
+    if (!pymolPtr || !out_ptr || !out_size) return 0;
+    *out_ptr = nullptr;
+    *out_size = 0;
+    PyMOLGlobals* G = PyMOL_GetGlobals(pymolPtr);
+    if (!G) return 0;
+
+#ifdef _PYMOL_NO_RAY
+    return 0;
+#endif
+
+    CScene *I = G->Scene;
+    if (!I) return 0;
+
+    if (width > 0 && height > 0) {
+        I->Width = width;
+        I->Height = height;
+    }
+
+    SceneUpdate(G, false);
+
+    int ray_width = width > 0 ? width : I->Width;
+    int ray_height = height > 0 ? height : I->Height;
+    if (ray_width <= 0 || ray_height <= 0) return 0;
+
+    float fov = SettingGetGlobal_f(G, cSetting_field_of_view);
+    int ortho = SettingGetGlobal_i(G, cSetting_ray_orthoscopic);
+    if (ortho < 0)
+        ortho = SettingGetGlobal_b(G, cSetting_ortho);
+
+    float aspRat = ((float) ray_width) / ((float) ray_height);
+
+    srand(0);
+
+    CRay* ray = RayNew(G, 0);
+    if (!ray) return 0;
+
+    float rayView[16];
+    float angle = 0.0f;
+    SceneRaySetRayView(G, I, 0, rayView, &angle, 0.0f);
+
+    float view_height = (float)(fabs(I->m_view.pos().z) * tan((fov / 2.0) * cPI / 180.0));
+    float view_width = view_height * aspRat;
+
+    float pixel_scale_value = SettingGetGlobal_f(G, cSetting_ray_pixel_scale);
+    if (pixel_scale_value < 0)
+        pixel_scale_value = 1.0f;
+    pixel_scale_value *= ((float) ray_height) / I->Height;
+
+    if (ortho) {
+        const float _1 = 1.0f;
+        RayPrepare(ray, -view_width, view_width, -view_height, view_height,
+                   I->m_view.m_clipSafe().m_front, I->m_view.m_clipSafe().m_back,
+                   fov, I->m_view.pos(), rayView, I->m_view.rotMatrix(),
+                   aspRat, ray_width, ray_height,
+                   pixel_scale_value, ortho, _1, _1,
+                   ((float) ray_height) / I->Height);
+    } else {
+        float pos_z = I->m_view.pos().z;
+        if ((-pos_z) < I->m_view.m_clipSafe().m_front)
+            pos_z = -I->m_view.m_clipSafe().m_front;
+
+        float back_ratio = -I->m_view.m_clipSafe().m_back / pos_z;
+        float back_height = back_ratio * view_height;
+        float back_width = aspRat * back_height;
+        RayPrepare(ray,
+                   -back_width, back_width, -back_height, back_height,
+                   I->m_view.m_clipSafe().m_front, I->m_view.m_clipSafe().m_back,
+                   fov, I->m_view.pos(), rayView, I->m_view.rotMatrix(),
+                   aspRat, ray_width, ray_height,
+                   pixel_scale_value, ortho,
+                   view_height / back_height,
+                   I->m_view.m_clipSafe().m_front / I->m_view.m_clipSafe().m_back,
+                   ((float) ray_height) / I->Height);
+    }
+
+    {
+        auto slot_vla = I->m_slots.data();
+        RenderInfo info;
+        info.ray = ray;
+        info.ortho = ortho;
+        info.vertex_scale = SceneGetScreenVertexScale(G, nullptr);
+        info.use_shaders = SettingGetGlobal_b(G, cSetting_use_shaders);
+
+        if (SettingGetGlobal_b(G, cSetting_dynamic_width)) {
+            info.dynamic_width = true;
+            info.dynamic_width_factor = SettingGetGlobal_f(G, cSetting_dynamic_width_factor);
+            info.dynamic_width_min = SettingGetGlobal_f(G, cSetting_dynamic_width_min);
+            info.dynamic_width_max = SettingGetGlobal_f(G, cSetting_dynamic_width_max);
+        }
+
+        for (auto* obj : I->Obj) {
+            if (obj->type != cObjectGroup) {
+                if (SceneGetDrawFlag(&I->grid, slot_vla, obj->grid_slot)) {
+                    float color[3];
+                    ColorGetEncoded(G, obj->Color, color);
+                    RaySetContext(ray, obj->getRenderContext());
+                    ray->color3fv(color);
+
+                    auto icx = SettingGetWD<int>(
+                        obj->Setting.get(), cSetting_ray_interior_color, cColorDefault);
+
+                    if (icx == cColorDefault) {
+                        ray->interiorColor3fv(color, true);
+                    } else if (icx == cColorObject) {
+                        ray->interiorColor3fv(color, false);
+                    } else {
+                        float icolor[3];
+                        ColorGetEncoded(G, icx, icolor);
+                        ray->interiorColor3fv(icolor, false);
+                    }
+
+                    info.state = ObjectGetCurrentState(obj, false);
+                    obj->render(&info);
+                }
+            }
+        }
+    }
+
+    auto packet = pymol::ray::buildScenePacket(ray);
+    auto bin = pymol::ray::serializeScenePacketBinary(packet);
+
+    RayFree(ray);
+
+    if (bin.empty()) return 0;
+
+    auto* outBuf = static_cast<unsigned char*>(malloc(bin.size()));
+    if (!outBuf) return 0;
+    std::memcpy(outBuf, bin.data(), bin.size());
+    *out_ptr = outBuf;
+    *out_size = static_cast<int>(bin.size());
+    return 1;
+}
+
+/**
  * Labels atoms matching a selection with an expression.
  * Uses the alternate (non-Python) expression evaluator, supporting
  * properties: name, resn, resi, resv, chain, alt, elem, type, q, b,

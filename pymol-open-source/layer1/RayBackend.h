@@ -90,6 +90,92 @@ struct ScenePacket {
 ScenePacket buildScenePacket(const CRay* ray);
 std::string serializeScenePacketJSON(const ScenePacket& scene);
 
+// ---------------------------------------------------------------------------
+// Binary scene format ("viewmol-ray-bin-v1")
+//
+// Eliminates JSON serialization/parsing overhead by writing primitives as
+// packed float32 arrays directly uploadable to WebGPU storage buffers.
+//
+// Layout (all multi-byte values are little-endian):
+//   [BinarySceneHeader]           — fixed 1200-byte header
+//   [float32 × 46 × primCount]   — primitive data (GPU-ready)
+//   [BinaryCharBitmapHeader × charCount] + [RGBA data per char]
+//   [BinaryLabelRunHeader × runCount]
+//   [BinaryGlyphHeader × glyphCount]
+//   [label text data (null-terminated strings)]
+//
+// The primitive section can be uploaded directly to a WebGPU storage
+// buffer without repacking — each primitive is 46 × 4 = 184 bytes,
+// matching the JSON stride but as raw IEEE 754 floats.
+// ---------------------------------------------------------------------------
+
+struct BinarySceneHeader {
+  char     magic[16];        // "viewmol-bin-v1\0\0"
+  uint32_t header_size;      // sizeof(BinarySceneHeader)
+  uint32_t prim_stride;      // 46 (floats per primitive)
+  uint32_t prim_count;
+  uint32_t prim_offset;      // byte offset from start of buffer
+  uint32_t char_count;
+  uint32_t char_offset;      // byte offset to char bitmap headers
+  uint32_t run_count;
+  uint32_t run_offset;       // byte offset to label run headers
+  uint32_t glyph_count;
+  uint32_t glyph_offset;     // byte offset to glyph headers
+  uint32_t text_offset;      // byte offset to label text data
+  uint32_t total_size;       // total buffer size in bytes
+  // Camera / scene metadata (same as JSON header fields)
+  float    model_view[16];
+  float    volume[6];
+  float    pos[3];
+  float    fov;
+  int32_t  width;
+  int32_t  height;
+  int32_t  orthoscopic;
+  int32_t  wobble;
+  float    wobble_params[3];
+  float    ray_improve_shadows;
+  float    ray_shadow_fudge;
+  float    random_table[256];
+  uint32_t _pad[2];          // pad to 8-byte alignment
+};
+
+struct BinaryCharBitmapHeader {
+  int32_t  char_id;
+  int32_t  width;
+  int32_t  height;
+  uint32_t data_offset;      // byte offset from start of buffer to RGBA data
+  uint32_t data_size;        // 4 * width * height
+};
+
+struct BinaryLabelRunHeader {
+  float    anchor[3];
+  float    color[4];          // RGBA
+  float    screen_offset[3];
+  float    indent_px[3];
+  float    scale;
+  int32_t  font_id;
+  float    font_size;
+  int32_t  relative_mode;
+  int32_t  prim_start;
+  int32_t  prim_count;
+  int32_t  glyph_start;
+  int32_t  glyph_count;
+  uint32_t text_offset;       // byte offset into text section
+  uint32_t text_length;       // length excluding null terminator
+};
+
+struct BinaryGlyphHeader {
+  int32_t  char_id;
+  float    offset_px[2];
+  float    size_px[2];
+  float    advance_px;
+  float    xorig;
+  float    yorig;
+};
+
+// Serialises a ScenePacket to binary format. Returns the raw buffer.
+std::vector<unsigned char> serializeScenePacketBinary(const ScenePacket& scene);
+
 } // namespace pymol::ray
 
 #endif

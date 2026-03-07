@@ -134,6 +134,9 @@ export interface PyMOLModule extends EmscriptenModuleBase {
     // Ray scene export (out_ptr is a pointer to a char* that receives a malloc'd buffer)
     _PyMOLWasm_GetRayScene(pymolPtr: number, width: number, height: number, outPtr: number, unused: number): number;
 
+    // Binary ray scene export (out_ptr receives malloc'd buffer, out_size receives byte count)
+    _PyMOLWasm_GetRaySceneBinary(pymolPtr: number, width: number, height: number, outPtr: number, outSize: number): number;
+
     // --- Issue 1: Viewing / Display ---
     _PyMOLWasm_Enable(pymolPtr: number, name: number): number;
     _PyMOLWasm_Disable(pymolPtr: number, name: number): number;
@@ -790,6 +793,58 @@ export class PyMOLHeadless {
             }
         } finally {
             m._free(outPtrPtr);
+        }
+    }
+
+    /**
+     * Export the ray scene as a binary buffer (viewmol-bin-v1 format).
+     *
+     * The primitive section is a packed float32 array directly uploadable
+     * to a WebGPU storage buffer — no JSON parsing or repacking needed.
+     *
+     * @param width Ray image width (0 = use scene width).
+     * @param height Ray image height (0 = use scene height).
+     * @returns Uint8Array with binary scene data.
+     */
+    getRaySceneBinary(width: number = 0, height: number = 0): Uint8Array {
+        const m = this.getModule();
+        const p = this.getInstancePtr();
+
+        // Allocate two pointer-sized slots: one for buffer address, one for size
+        const outPtrPtr = m._malloc(4);
+        const outSizePtr = m._malloc(4);
+        if (outPtrPtr === 0 || outSizePtr === 0) {
+            if (outPtrPtr) m._free(outPtrPtr);
+            if (outSizePtr) m._free(outSizePtr);
+            throw new Error("Failed to allocate pointer slots");
+        }
+
+        try {
+            m.HEAP32[outPtrPtr >> 2] = 0;
+            m.HEAP32[outSizePtr >> 2] = 0;
+
+            const ok = m._PyMOLWasm_GetRaySceneBinary(p, width, height, outPtrPtr, outSizePtr);
+
+            if (ok === 0) {
+                throw new Error("GetRaySceneBinary failed — no scene data available");
+            }
+
+            const bufPtr = m.HEAP32[outPtrPtr >> 2];
+            const bufSize = m.HEAP32[outSizePtr >> 2];
+
+            if (bufPtr === 0 || bufSize === 0) {
+                throw new Error("GetRaySceneBinary returned null/empty buffer");
+            }
+
+            try {
+                // Copy from WASM heap — the caller owns the resulting Uint8Array
+                return new Uint8Array(m.HEAPU8.buffer.slice(bufPtr, bufPtr + bufSize));
+            } finally {
+                m._free(bufPtr);
+            }
+        } finally {
+            m._free(outPtrPtr);
+            m._free(outSizePtr);
         }
     }
 
