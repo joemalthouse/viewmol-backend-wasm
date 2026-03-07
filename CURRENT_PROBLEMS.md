@@ -1,6 +1,6 @@
 # Current Differences: WASM vs Native PyMOL
 
-The core molecular engine (atom storage, bond computation, representation generation, coordinate transforms, settings) is the same C++ code. The WASM C API produces identical internal state to native PyMOL for all 100 tested scenarios (100/100 PASS, 99.27 dB mean PSNR). The differences below are gaps in the API surface and platform-level numerical precision.
+The core molecular engine (atom storage, bond computation, representation generation, coordinate transforms, settings) is the same C++ code. The WASM C API produces identical internal state to native PyMOL for all 100 tested scenarios (100/100 PASS, 99.27 dB mean PSNR). The `SettingSetGlobal_f` API correctly handles int/bool/color-typed settings via PyMOL's type-checking in `SettingSet_f`. The differences below are gaps in the API surface and platform-level numerical precision.
 
 ## 1. Missing C API Surface
 
@@ -117,17 +117,17 @@ The native Python layer has extensive export functions (`get_pdbstr`, `get_sdfst
 
 Confirmed: 4,157 FMA instructions in the native binary. The isosurface pipeline (`Isosurf.cpp` → `IsosurfInterpolate`, `RepMesh.cpp` → grid construction) produces vertex coordinates that differ by ~3e-5 between native ARM64 and WASM. This is inherent to the platform — not fixable without either:
 - Rebuilding native PyMOL from source with `-ffp-contract=off` (disabling FMA)
-- Or accepting the difference (current approach, `knownPlatformPsnr: 45`)
+- Or accepting the difference (current approach)
 
 On x86_64 hosts, this difference would likely vanish since both paths would use SSE without FMA (unless AVX2+FMA3 is enabled).
 
-Note: The CMakeLists.txt does not set any `-ffp-contract` or `-ffast-math` flags. The FMA differences arise from the compiler's default behavior on ARM64 targets. Only one test case (`wasm_rep_mesh`) uses `knownPlatformPsnr: 45` to accommodate this.
+Note: The CMakeLists.txt does not set any `-ffp-contract` or `-ffast-math` flags. The FMA differences arise from the compiler's default behavior on ARM64 targets. All surface/mesh test cases currently pass at ≥60 dB PSNR despite FMA differences.
 
-## 5. No `label_runs` Batching
+## 5. Label Runs (v1 format)
 
-The native fork adds a `label_runs` vector to `CRay` that groups consecutive character primitives into runs (text string + position + style). The WASM build processes labels as individual `cPrimCharacter` primitives (one per glyph) in `RayBackend.cpp`. This works correctly — labels render identically (99 dB) — but the per-glyph approach sends more data over the wire than a batched text run would.
+The `CRay` struct has a `label_runs` vector (`Ray.h:212`) that groups consecutive character primitives into runs (text string + position + style + per-glyph metrics). `RayBackend.cpp` serializes these as `label_runs_version: 1` in the scene JSON, containing both `runs` (run-level metadata) and `glyphs` (per-glyph positioning data). Character bitmaps are collected from both `cPrimCharacter` primitives and glyph entries, deduplicated by `char_id`, and emitted as base64-encoded RGBA in `char_bitmaps`.
 
-Note: `label_runs` does not exist anywhere in this repository's source code. It is described as a feature of an external native fork. The `CRay` struct in this codebase has no `label_runs` field. The current implementation collects unique character bitmaps (`CharBitmapPacket`) from `cPrimCharacter` primitives and serializes them individually in the JSON scene packet.
+Both native and WASM use the same embedded DejaVuSans font (font ID 5) via `_WEBGL_INCLUDE_DEFAULT_FONT`. The WASM build only includes this single FreeType font (fonts 6-18 are excluded by `#ifndef _WEBGL`), which is sufficient for all current test cases. Label rendering achieves 99+ dB PSNR.
 
 ## 6. Missing Introspection
 
