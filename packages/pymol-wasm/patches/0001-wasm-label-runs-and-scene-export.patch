@@ -1,0 +1,235 @@
+diff --git a/layer1/FontGLUT.cpp b/layer1/FontGLUT.cpp
+index 1528576..906e47e 100644
+--- a/layer1/FontGLUT.cpp
++++ b/layer1/FontGLUT.cpp
+@@ -428,8 +428,12 @@ const char* CFontGLUT::RenderRay(CRay* ray, const char* st, float size,
+                                           (float) ch->yorig,
+                                           (float) ch->advance, &fprnt, sampling);
+             }
+-            if(id)
+-              ray->character(id); /* handles advance */
++            if(id) {
++              if(ray->current_label_run)
++                ray->labelRunChar(id);
++              else
++                ray->character(id); /* handles advance */
++            }
+           }
+         }
+       }
+diff --git a/layer1/FontType.cpp b/layer1/FontType.cpp
+index 97b0253..5c92930 100644
+--- a/layer1/FontType.cpp
++++ b/layer1/FontType.cpp
+@@ -512,7 +512,10 @@ const char* CFontType::RenderRay(CRay* ray, const char* st, float size,
+               add3f(v, x_adj, pos);
+               TextSetPos(I->G, pos);
+             }
+-            ray->character(id);   /* handles advance */
++            if(ray->current_label_run)
++              ray->labelRunChar(id);
++            else
++              ray->character(id);   /* handles advance */
+ 
+             kern_flag = true;
+             last_c = c;
+diff --git a/layer1/Ray.cpp b/layer1/Ray.cpp
+index 823129b..7f1bb2f 100644
+--- a/layer1/Ray.cpp
++++ b/layer1/Ray.cpp
+@@ -6845,6 +6845,91 @@ int CRay::character(int char_id)
+   return true;
+ }
+ 
++void CRay::beginLabelRun(int font_id, float font_size,
++                         int relative_mode, const char* text,
++                         const float* screen_offset)
++{
++  label_runs.emplace_back();
++  current_label_run = &label_runs.back();
++
++  float *v = TextGetPos(G);
++  copy3f(v, current_label_run->origin);
++
++  if (TTTFlag) {
++    transformTTT44f3f(glm::value_ptr(TTT), current_label_run->origin,
++                      current_label_run->origin);
++  }
++
++  current_label_run->v_scale = RayGetScreenVertexScale(this, current_label_run->origin) / Sampling;
++  RayApplyContextToVertex(this, current_label_run->origin);
++
++  // Screen-aligned axes (same computation as character())
++  float xn[3] = {1.0f, 0.0f, 0.0f};
++  float yn[3] = {0.0f, 1.0f, 0.0f};
++  float zn[3] = {0.0f, 0.0f, 1.0f};
++  RayApplyMatrixInverse33(1, (float3*)xn, glm::value_ptr(Rotation), (float3*)xn);
++  RayApplyMatrixInverse33(1, (float3*)yn, glm::value_ptr(Rotation), (float3*)yn);
++  RayApplyMatrixInverse33(1, (float3*)zn, glm::value_ptr(Rotation), (float3*)zn);
++  copy3f(xn, current_label_run->x_axis);
++  copy3f(yn, current_label_run->y_axis);
++  copy3f(zn, current_label_run->normal);
++
++  current_label_run->trans = Trans;
++  copy3f(IntColor, current_label_run->color);
++  current_label_run->font_id = font_id;
++  current_label_run->font_size = font_size;
++  current_label_run->relative_mode = relative_mode;
++  current_label_run->text = text ? text : "";
++  if (screen_offset) {
++    copy3f(screen_offset, current_label_run->screen_offset);
++  } else {
++    zero3f(current_label_run->screen_offset);
++  }
++  zero3f(current_label_run->indent_px);
++  current_label_run->prim_start = static_cast<int>(NPrimitive);
++  current_label_run->prim_count = 0;
++  current_label_run->cursor_x_px = 0.0f;
++}
++
++void CRay::labelRunChar(int char_id)
++{
++  // Always emit character primitives (type 5) for the non-v1 rendering path.
++  character(char_id);
++
++  // Additionally record glyph data for the v1 label_runs format.
++  if (current_label_run) {
++    int width_i, height_i;
++    float xorig, yorig, advance;
++    CharacterGetGeometry(G, char_id, &width_i, &height_i, &xorig, &yorig, &advance);
++
++    LabelGlyph glyph;
++    glyph.char_id = char_id;
++    glyph.offset_px[0] = current_label_run->cursor_x_px;
++    glyph.offset_px[1] = 0.0f;
++    glyph.size_px[0] = static_cast<float>(width_i);
++    glyph.size_px[1] = static_cast<float>(height_i);
++    glyph.advance_px = advance;
++    glyph.xorig = xorig;
++    glyph.yorig = yorig;
++    current_label_run->glyphs.push_back(glyph);
++
++    current_label_run->cursor_x_px += advance;
++    // Note: cursor already advanced by character() above
++  }
++}
++
++void CRay::endLabelRun()
++{
++  if (current_label_run) {
++    if (current_label_run->glyphs.empty()) {
++      label_runs.pop_back();
++    } else {
++      current_label_run->prim_count =
++          static_cast<int>(NPrimitive) - current_label_run->prim_start;
++    }
++  }
++  current_label_run = nullptr;
++}
+ 
+ /*========================================================================*/
+ int CRay::cylinder3fv(const cgo::draw::cylinder &cyl){
+diff --git a/layer1/Ray.h b/layer1/Ray.h
+index f8c1339..c5ae453 100644
+--- a/layer1/Ray.h
++++ b/layer1/Ray.h
+@@ -104,6 +104,35 @@ namespace draw{
+ }
+ };
+ 
++struct LabelGlyph {
++  int char_id;
++  float offset_px[2];           // cumulative pixel offset from run origin
++  float size_px[2];             // glyph width, height in pixels
++  float advance_px;             // advance width in pixels
++  float xorig;                  // x origin offset
++  float yorig;                  // y origin offset
++};
++
++struct LabelRun {
++  float origin[3];             // 3D anchor point of the label
++  float normal[3];             // screen-facing normal (z-axis in world)
++  float x_axis[3];             // screen-right in world coords
++  float y_axis[3];             // screen-up in world coords
++  float v_scale;               // world-units-per-pixel at this depth
++  float color[3];              // text color RGB
++  float trans;                 // transparency (0 = opaque)
++  int font_id;                 // GLUT font identifier
++  float screen_offset[3];     // screen-space offset (relative mode)
++  float indent_px[3];         // pixel indent from anchor
++  float font_size;            // font size setting
++  int relative_mode;           // label relative mode
++  int prim_start;             // first primitive index for this label
++  int prim_count;             // number of primitives for this label
++  std::string text;            // label text string
++  std::vector<LabelGlyph> glyphs;  // per-glyph data
++  float cursor_x_px;          // accumulated x advance in pixels (internal)
++};
++
+ struct _CRay {
+ 
+   // methods
+@@ -133,6 +162,11 @@ struct _CRay {
+   void wobble(int mode, const float *par);
+   void transparentf(float t);
+   int character(int char_id);
++  void beginLabelRun(int font_id, float font_size = 14.0f,
++                     int relative_mode = 0, const char* text = "",
++                     const float* screen_offset = nullptr);
++  void labelRunChar(int char_id);
++  void endLabelRun();
+   void interiorColor3fv(const float *v, int passive);
+   int ellipsoid3fv(const float *v, float r, const float *n1, const float *n2, const float *n3);
+   int setLastToNoLighting(char no_lighting);
+@@ -175,6 +209,8 @@ struct _CRay {
+   float Fov;
+   glm::vec3 Pos;
+   std::shared_ptr<pymol::Image> bkgrd_data;
++  std::vector<LabelRun> label_runs;
++  LabelRun* current_label_run = nullptr;
+ 
+ private:
+   int cylinder3fv(const float *v1, const float *v2, float r, const float *c1, const float *c2,
+diff --git a/layer1/SceneRay.cpp b/layer1/SceneRay.cpp
+index ac2e332..301a864 100644
+--- a/layer1/SceneRay.cpp
++++ b/layer1/SceneRay.cpp
+@@ -1,6 +1,7 @@
+ 
+ #include"Scene.h"
+ #include"SceneRay.h"
++#include"RayBackend.h"
+ #include"SceneDef.h"
+ #include"Util.h"
+ #include"ShaderMgr.h"
+@@ -487,6 +488,14 @@ bool SceneRay(PyMOLGlobals * G,
+                             I->m_view.m_clipSafe().m_front, I->m_view.m_clipSafe().m_back, fov);
+         }
+         break;
++      case 9:                   /* mode 9 is WebGPU scene JSON */
++        {
++          auto pkt = pymol::ray::buildScenePacket(ray);
++          auto json = pymol::ray::serializeScenePacketJSON(pkt);
++          *charVLA_ptr = VLACalloc(char, json.size() + 1);
++          std::memcpy(*charVLA_ptr, json.data(), json.size());
++        }
++        break;
+ 
+       }
+       RayFree(ray);
+diff --git a/layer2/RepLabel.cpp b/layer2/RepLabel.cpp
+index 9740ab9..c2bfaa0 100644
+--- a/layer2/RepLabel.cpp
++++ b/layer2/RepLabel.cpp
+@@ -1275,8 +1275,11 @@ static void RepLabelRenderRay(RepLabel* I, RenderInfo* info)
+ 
+         TextSetPosNColor(G, tCenter, I->labelV[c].color);
+ 
++        float screenOff[3] = {0.0f, 0.0f, 0.0f};
++        ray->beginLabelRun(font_id, font_size, relativeMode, st, screenOff);
+         TextRenderRay(G, ray, font_id, st, font_size, I->labelV[c].position,
+             (draw_var ? 1 : 0), I->labelV[c].getRelativeMode());
++        ray->endLabelRun();
+         if (draw_var) {
+           RepLabelRenderRayBackground(I, info, I->labelV[c].color, draw_var);
+         }

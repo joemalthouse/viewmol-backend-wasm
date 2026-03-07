@@ -1,0 +1,57 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    needs: []
+    permissions:
+      contents: read
+      deployments: write
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # --- Get WASM artifact (from cache or build) ---
+      - name: Restore WASM build cache
+        id: wasm-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: packages/pymol-wasm/dist
+          key: wasm-${{ hashFiles('packages/pymol-wasm/overlay/**', 'packages/pymol-wasm/patches/**', 'packages/pymol-wasm/PYMOL_VERSION') }}
+
+      - name: Verify WASM artifact
+        run: |
+          if [[ ! -f packages/pymol-wasm/dist/pymol_wasm.wasm ]]; then
+            echo "ERROR: WASM artifact not found in cache."
+            echo "Run the CI workflow first to build the WASM artifact."
+            exit 1
+          fi
+          ls -lh packages/pymol-wasm/dist/
+
+      # --- Build app ---
+      - run: npm ci
+
+      - name: Stage WASM for Vite
+        run: |
+          cp packages/pymol-wasm/dist/pymol_wasm.js packages/app/public/
+          cp packages/pymol-wasm/dist/pymol_wasm.wasm packages/app/public/
+
+      - name: Build app
+        run: npm -w @viewmol/app run build
+
+      # --- Deploy to Cloudflare Pages ---
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy packages/app/dist --project-name=viewmol

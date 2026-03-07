@@ -1,0 +1,162 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Job 1: Build PyMOL WASM (skip if no C++ changes)
+  # -----------------------------------------------------------------------
+  build-wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # Only rebuild WASM when C++ source, patches, or build config change
+    if: >-
+      github.event_name == 'push' ||
+      contains(github.event.pull_request.labels.*.name, 'rebuild-wasm') ||
+      true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Check if WASM rebuild is needed ---
+      - name: Check for C++ changes
+        id: cpp-changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            wasm:
+              - 'packages/pymol-wasm/overlay/**'
+              - 'packages/pymol-wasm/patches/**'
+              - 'packages/pymol-wasm/PYMOL_VERSION'
+              - 'packages/pymol-wasm/scripts/**'
+
+      # --- Restore cached WASM artifact ---
+      - name: Restore WASM build cache
+        id: wasm-cache
+        if: steps.cpp-changes.outputs.wasm != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: packages/pymol-wasm/dist
+          key: wasm-${{ hashFiles('packages/pymol-wasm/overlay/**', 'packages/pymol-wasm/patches/**', 'packages/pymol-wasm/PYMOL_VERSION') }}
+
+      # --- Skip build if cache hit and no changes ---
+      - name: Skip build (cache hit)
+        if: steps.wasm-cache.outputs.cache-hit == 'true' && steps.cpp-changes.outputs.wasm != 'true'
+        run: echo "WASM artifact restored from cache, skipping build"
+
+      # --- Full build path ---
+      - name: Cache Emscripten SDK
+        if: steps.wasm-cache.outputs.cache-hit != 'true' || steps.cpp-changes.outputs.wasm == 'true'
+        id: emsdk-cache
+        uses: actions/cache@v4
+        with:
+          path: emsdk
+          key: emsdk-3.1.51-${{ runner.os }}
+
+      - name: Install Emscripten SDK
+        if: (steps.wasm-cache.outputs.cache-hit != 'true' || steps.cpp-changes.outputs.wasm == 'true') && steps.emsdk-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git
+          cd emsdk
+          ./emsdk install 3.1.51
+          ./emsdk activate 3.1.51
+
+      - name: Cache Emscripten ports
+        if: steps.wasm-cache.outputs.cache-hit != 'true' || steps.cpp-changes.outputs.wasm == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.emscripten_cache
+          key: em-ports-3.1.51-${{ runner.os }}-${{ hashFiles('packages/pymol-wasm/overlay/CMakeLists.txt') }}
+
+      - name: Cache ccache
+        if: steps.wasm-cache.outputs.cache-hit != 'true' || steps.cpp-changes.outputs.wasm == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('packages/pymol-wasm/overlay/**/*.cpp', 'packages/pymol-wasm/overlay/**/*.h', 'packages/pymol-wasm/patches/**') }}
+          restore-keys: ccache-${{ runner.os }}-
+
+      - name: Install ccache
+        if: steps.wasm-cache.outputs.cache-hit != 'true' || steps.cpp-changes.outputs.wasm == 'true'
+        run: sudo apt-get install -y ccache
+
+      - name: Prepare PyMOL source
+        if: steps.wasm-cache.outputs.cache-hit != 'true' || steps.cpp-changes.outputs.wasm == 'true'
+        run: packages/pymol-wasm/scripts/prepare.sh
+
+      - name: Build WASM
+        if: steps.wasm-cache.outputs.cache-hit != 'true' || steps.cpp-changes.outputs.wasm == 'true'
+        run: |
+          source emsdk/emsdk_env.sh
+          packages/pymol-wasm/scripts/build.sh
+
+      # --- Save cache for future runs ---
+      - name: Save WASM build cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: packages/pymol-wasm/dist
+          key: wasm-${{ hashFiles('packages/pymol-wasm/overlay/**', 'packages/pymol-wasm/patches/**', 'packages/pymol-wasm/PYMOL_VERSION') }}
+
+      # --- Upload artifact for deploy job ---
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pymol-wasm
+          path: packages/pymol-wasm/dist/
+          retention-days: 30
+
+  # -----------------------------------------------------------------------
+  # Job 2: TypeScript type-check
+  # -----------------------------------------------------------------------
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit -p packages/app/tsconfig.json
+
+  # -----------------------------------------------------------------------
+  # Job 3: Build frontend app
+  # -----------------------------------------------------------------------
+  build-app:
+    runs-on: ubuntu-latest
+    needs: [build-wasm]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pymol-wasm
+          path: packages/pymol-wasm/dist/
+
+      - run: npm ci
+
+      # Copy WASM files to app's public dir for Vite to serve
+      - name: Stage WASM for Vite
+        run: |
+          cp packages/pymol-wasm/dist/pymol_wasm.js packages/app/public/
+          cp packages/pymol-wasm/dist/pymol_wasm.wasm packages/app/public/
+
+      - name: Build app
+        run: npm -w @viewmol/app run build
+
+      - name: Upload app dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-dist
+          path: packages/app/dist/
+          retention-days: 7

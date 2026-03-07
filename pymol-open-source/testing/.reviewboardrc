@@ -1,3 +1,0 @@
-REPOSITORY = 'pymol-testing'
-REVIEWBOARD_URL = "https://reviewboard.schrodinger.com"
-TRACKING_BRANCH = 'origin/master'

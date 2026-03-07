@@ -1,0 +1,13 @@
+{
+  "name": "@viewmol/ray-tracer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "echo 'TODO: implement ray-tracer build'"
+  }
+}

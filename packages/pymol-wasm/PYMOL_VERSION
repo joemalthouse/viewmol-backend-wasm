@@ -1,0 +1,11 @@
+# Upstream PyMOL open-source version used for WASM compilation.
+# prepare.sh clones this exact ref and applies patches + overlay.
+PYMOL_REPO=https://github.com/schrodinger/pymol-open-source.git
+PYMOL_REF=v3.1.0
+
+# Emscripten SDK version (must match CI cache key)
+EMSDK_VERSION=3.1.51
+
+# GLM header-only math library
+GLM_REPO=https://github.com/g-truc/glm.git
+GLM_REF=1.0.1

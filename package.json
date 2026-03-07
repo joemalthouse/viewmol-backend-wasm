@@ -1,10 +1,18 @@
 {
-  "name": "pymol-backend-wasm",
+  "name": "viewmol",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
-  "dependencies": {
-    "viewmol-ray-tracer": "file:../viewmol-ray-tracer"
+  "workspaces": [
+    "packages/pymol-wasm",
+    "packages/ray-tracer",
+    "packages/app"
+  ],
+  "scripts": {
+    "prepare-source": "npm -w @viewmol/pymol-wasm run prepare-source",
+    "build:wasm": "npm -w @viewmol/pymol-wasm run build:wasm",
+    "build:app": "npm -w @viewmol/app run build",
+    "dev": "npm -w @viewmol/app run dev",
+    "test:parity": "tsx tests/parity/wasm-parity.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
