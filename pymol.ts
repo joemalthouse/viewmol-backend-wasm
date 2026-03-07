@@ -799,14 +799,44 @@ export class PyMOLHeadless {
     /**
      * Export the ray scene as a binary buffer (viewmol-bin-v1 format).
      *
-     * The primitive section is a packed float32 array directly uploadable
-     * to a WebGPU storage buffer — no JSON parsing or repacking needed.
+     * Returns a **copy** of the binary data that the caller owns.
+     * For zero-copy access, use `getRaySceneBinaryView()` instead.
      *
      * @param width Ray image width (0 = use scene width).
      * @param height Ray image height (0 = use scene height).
-     * @returns Uint8Array with binary scene data.
+     * @returns Uint8Array with binary scene data (owned by caller).
      */
     getRaySceneBinary(width: number = 0, height: number = 0): Uint8Array {
+        const { ptr, size } = this._getRaySceneBinaryRaw(width, height);
+        const m = this.getModule();
+        // Copy from WASM heap — the caller owns the resulting Uint8Array
+        return new Uint8Array(m.HEAPU8.buffer.slice(ptr, ptr + size));
+    }
+
+    /**
+     * Export the ray scene as a zero-copy view into WASM heap memory.
+     *
+     * **IMPORTANT**: The returned Uint8Array is a live view into the WASM
+     * linear memory. It is invalidated by:
+     *   - Any subsequent call to getRaySceneBinary/getRaySceneBinaryView
+     *   - Any WASM call that triggers memory growth (rare but possible)
+     *
+     * Use this for maximum throughput when uploading directly to a
+     * GPUBuffer via `device.queue.writeBuffer(buf, 0, view)`.
+     *
+     * @param width Ray image width (0 = use scene width).
+     * @param height Ray image height (0 = use scene height).
+     * @returns Uint8Array view into WASM heap (do NOT retain across WASM calls).
+     */
+    getRaySceneBinaryView(width: number = 0, height: number = 0): Uint8Array {
+        const { ptr, size } = this._getRaySceneBinaryRaw(width, height);
+        const m = this.getModule();
+        // Return a view — no copy, no allocation. Caller must consume immediately.
+        return new Uint8Array(m.HEAPU8.buffer, ptr, size);
+    }
+
+    /** @internal Shared implementation for binary scene export. */
+    private _getRaySceneBinaryRaw(width: number, height: number): { ptr: number; size: number } {
         const m = this.getModule();
         const p = this.getInstancePtr();
 
@@ -836,12 +866,8 @@ export class PyMOLHeadless {
                 throw new Error("GetRaySceneBinary returned null/empty buffer");
             }
 
-            try {
-                // Copy from WASM heap — the caller owns the resulting Uint8Array
-                return new Uint8Array(m.HEAPU8.buffer.slice(bufPtr, bufPtr + bufSize));
-            } finally {
-                m._free(bufPtr);
-            }
+            // The C++ side uses a persistent static buffer — do NOT free bufPtr.
+            return { ptr: bufPtr, size: bufSize };
         } finally {
             m._free(outPtrPtr);
             m._free(outSizePtr);
